@@ -2,10 +2,13 @@
 
 Создаёт в TLauncher версию «MineSerc 26.3» (Fabric, сервер в «Сетевой игре»),
 синхронизирует моды и ресурспаки с облака на ПК хоста (через Radmin) и открывает TLauncher.
+Ещё загружает скин игрока в облако; в игре его показывает мод CustomSkinLoader.
 """
 import hashlib
 import json
 import os
+import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -72,6 +75,14 @@ def ensure_server(path: Path, name: str, ip: str) -> None:
         rest = data[len(head) + 5:]
         path.write_bytes(head + b"\x0a" + (1).to_bytes(4, "big") + entry + rest)
     # Иначе формат неожиданный — файл не трогаем
+
+
+def tlauncher_nick(mc_dir: Path) -> str:
+    # Ник выбранного аккаунта TLauncher; пусто, если не нашли
+    data = load_json(mc_dir / "TlauncherProfiles.json", {})
+    account = data.get("accounts", {}).get(data.get("selectedAccountUUID") or "", {})
+    profile = account.get("selectedProfile") or {}
+    return profile.get("name") or account.get("displayName") or account.get("username") or ""
 
 
 def minecraft_dir() -> Path:
@@ -150,6 +161,46 @@ class Updater:
         state["version_key"] = key
         save_json(self.state_file, state)
 
+    def setup_skin_loader(self) -> None:
+        # Наше облако первым в списке CustomSkinLoader, остальные его настройки не трогаем
+        path = self.game_dir / "CustomSkinLoader" / "CustomSkinLoader.json"
+        config = load_json(path, {})
+        ours = {"name": APP_NAME, "type": "CustomSkinAPI", "root": f"{CLOUD_URL}/skins/"}
+        loadlist = config.get("loadlist") or []
+        if loadlist and loadlist[0] == ours:
+            return
+        config["loadlist"] = [ours] + [p for p in loadlist if p.get("name") != APP_NAME]
+        save_json(path, config)
+
+    def upload_skin(self, nick: str, png: Path, slim: bool) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,16}", nick):
+            raise RuntimeError("Ник должен быть из 3–16 латинских букв, цифр или _ — как в TLauncher.")
+        data = png.read_bytes()
+        if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise RuntimeError("Скин должен быть картинкой PNG.")
+        # Токен ника: создаётся при первой загрузке и хранится только у этого игрока
+        state = load_json(self.state_file, {})
+        tokens = state.setdefault("skin_tokens", {})
+        token = tokens.setdefault(nick.lower(), secrets.token_urlsafe(24))
+        save_json(self.state_file, state)
+
+        self.status("Загружаю скин…")
+        headers = {"X-Nick": nick, "X-Token": token, "X-Model": "slim" if slim else "default",
+                   "Content-Type": "image/png"}
+        try:
+            r = cloud.post(f"{CLOUD_URL}/skins/upload", data=data, headers=headers, timeout=15)
+        except requests.RequestException as e:
+            raise RuntimeError("Нет связи с сервером. Проверь Radmin VPN.\n\n" + str(e)) from None
+        try:
+            message = r.json()["message"]
+        except (ValueError, KeyError):
+            message = f"Ошибка сервера ({r.status_code})"
+        if r.status_code != 200:
+            raise RuntimeError(message)
+        state["skin_nick"] = nick
+        save_json(self.state_file, state)
+        return f"{message} для {nick}. Другие увидят его после перезахода на сервер."
+
     def sync_files(self, items: list, folder: str, what: str) -> None:
         """Скачивает файлы из облака в game_dir/<folder> (одноимённая папка в облаке)."""
         target = self.game_dir / folder
@@ -222,6 +273,7 @@ class Updater:
     def run(self, open_tl: bool = True) -> str:
         manifest = self.fetch_manifest()
         self.install_version(manifest)
+        self.setup_skin_loader()
         self.sync_files(manifest["mods"], "mods", "мод")
         packs = manifest.get("resourcepacks", [])
         self.sync_files(packs, "resourcepacks", "ресурспак")
@@ -234,7 +286,7 @@ class Updater:
 
 def run_gui() -> None:
     import tkinter as tk
-    from tkinter import messagebox, ttk
+    from tkinter import filedialog, messagebox, ttk
 
     root = tk.Tk()
     root.title(APP_NAME)
@@ -250,6 +302,19 @@ def run_gui() -> None:
     ttk.Label(frm, textvariable=status_var, wraplength=340).grid(column=0, row=3, sticky="w")
     go = ttk.Button(frm, text="Обновить и открыть TLauncher")
     go.grid(column=0, row=4, pady=(12, 0), sticky="we")
+
+    # Скин: ник как в TLauncher, тип модели и выбор PNG
+    skin = ttk.LabelFrame(frm, text="Скин на сервере", padding=8)
+    skin.grid(column=0, row=5, pady=(14, 0), sticky="we")
+    probe = Updater(lambda s: None, lambda v: None)
+    nick_var = tk.StringVar(value=load_json(probe.state_file, {}).get("skin_nick") or tlauncher_nick(probe.mc_dir))
+    slim_var = tk.BooleanVar(value=False)
+    ttk.Label(skin, text="Ник:").grid(column=0, row=0, sticky="w")
+    ttk.Entry(skin, textvariable=nick_var, width=24).grid(column=1, row=0, columnspan=2, sticky="we", padx=(6, 0))
+    ttk.Radiobutton(skin, text="Обычная модель", variable=slim_var, value=False).grid(column=0, row=1, columnspan=2, sticky="w", pady=(6, 0))
+    ttk.Radiobutton(skin, text="Тонкие руки (Алекс)", variable=slim_var, value=True).grid(column=2, row=1, sticky="w", pady=(6, 0))
+    pick = ttk.Button(skin, text="Выбрать скин (PNG)…")
+    pick.grid(column=0, row=2, columnspan=3, pady=(8, 0), sticky="we")
 
     def ui(fn, *a):
         root.after(0, fn, *a)
@@ -269,13 +334,36 @@ def run_gui() -> None:
         go.state(["disabled"])
         threading.Thread(target=worker, daemon=True).start()
 
+    def skin_worker(nick, png, slim):
+        upd = Updater(lambda s: ui(status_var.set, s), lambda v: None)
+        try:
+            ui(status_var.set, upd.upload_skin(nick, png, slim))
+        except Exception as e:
+            traceback.print_exc()
+            ui(messagebox.showerror, APP_NAME, str(e))
+            ui(status_var.set, "Скин не загружен")
+        ui(pick.state, ["!disabled"])
+
+    def on_pick():
+        nick = nick_var.get().strip()
+        if not nick:
+            messagebox.showwarning(APP_NAME, "Впиши ник, под которым играешь в TLauncher.")
+            return
+        png = filedialog.askopenfilename(title="Выбери скин", filetypes=[("Скин PNG", "*.png")])
+        if png:
+            pick.state(["disabled"])
+            threading.Thread(target=skin_worker, args=(nick, Path(png), slim_var.get()), daemon=True).start()
+
     go.configure(command=on_go)
+    pick.configure(command=on_pick)
     root.mainloop()
 
 
 if __name__ == "__main__":
-    # Отладка: launcher.py --cli [--no-open]
-    if len(sys.argv) >= 2 and sys.argv[1] == "--cli":
+    # Отладка: launcher.py --cli [--no-open]  |  launcher.py --skin <ник> <файл.png> [--slim]
+    if len(sys.argv) >= 4 and sys.argv[1] == "--skin":
+        print(Updater(print, lambda v: None).upload_skin(sys.argv[2], Path(sys.argv[3]), "--slim" in sys.argv))
+    elif len(sys.argv) >= 2 and sys.argv[1] == "--cli":
         print(Updater(print, lambda v: None).run(open_tl="--no-open" not in sys.argv))
     else:
         run_gui()

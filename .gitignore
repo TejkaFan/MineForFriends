@@ -5,3 +5,4 @@ __pycache__/
 *.log
 build_log*.txt
 *.spec
+skin_tokens.json
