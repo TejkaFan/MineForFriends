@@ -14,7 +14,7 @@ import requests
 API = "https://api.modrinth.com/v2"
 GAME = "26.3"
 s = requests.Session()
-s.headers["User-Agent"] = "MineSerc-server-setup"
+s.headers["User-Agent"] = "MineForFriends-server-setup"
 
 
 def latest_version(project: str) -> dict:

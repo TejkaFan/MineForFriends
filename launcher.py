@@ -1,4 +1,4 @@
-"""Обновлятор MineSerc для TLauncher.
+"""MineForFriends by TEJKA — лаунчер-помощник для игры с друзьями через TLauncher.
 
 Для каждой выбранной сборки (кнопка «Сборки…») создаёт в TLauncher свою версию
 (Fabric, сервер в «Сетевой игре», отдельная папка игры), синхронизирует её файлы
@@ -22,14 +22,21 @@ from pathlib import Path
 import requests
 
 import custom_packs
+import server_host
 
-APP_NAME = "MineSerc"
+APP_NAME = "MineForFriends by TEJKA"
+# Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
+APP_ID = "MineForFriends"
+LAUNCHER_EXE = f"{APP_ID}.exe"
+# Прежнее имя приложения: забираем его настройки и чистим его следы
+OLD_APP_ID = "MineSerc"
 CLOUD_URL = "http://26.199.180.115:8518"
 # Каталог скинов: там можно скачать PNG и выбрать его кнопкой «Выбрать скин»
 SKINS_SITE = "https://www.minecraftskins.com/"
 APPDATA = Path(os.environ.get("APPDATA", Path.home()))
 TL_PROPERTIES = APPDATA / ".tlauncher" / "tlauncher-2.0.properties"
-SETTINGS_FILE = APPDATA / APP_NAME / "settings.json"
+SETTINGS_FILE = APPDATA / APP_ID / "settings.json"
+OLD_SETTINGS_FILE = APPDATA / OLD_APP_ID / "settings.json"
 MOJANG_MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 
 # Основная сборка; старый манифест облака не содержит этих полей
@@ -40,7 +47,7 @@ DEFAULT_PACK = {
 }
 # Как часто обновлять индикатор серверов, мс
 STATUS_REFRESH = 30_000
-# Описание свежего MineSerc.exe в облаке ({"sha1", "size"}), пишет update_manifest.py
+# Описание свежего MineForFriends.exe в облаке ({"sha1", "size"}), пишет update_manifest.py
 LAUNCHER_INFO = "launcher.json"
 # Внутри exe ресурсы лежат во временной папке PyInstaller
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -49,6 +56,16 @@ RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 cloud = requests.Session()
 cloud.trust_env = False
 web = requests.Session()
+
+
+def migrate_settings() -> None:
+    # Настройки прежнего MineSerc (выбранные сборки, свои сборки, серверы) переезжают один раз
+    if not SETTINGS_FILE.exists() and OLD_SETTINGS_FILE.exists():
+        try:
+            SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            SETTINGS_FILE.write_bytes(OLD_SETTINGS_FILE.read_bytes())
+        except OSError:
+            pass
 
 
 def load_json(path: Path, default):
@@ -201,10 +218,11 @@ def inside(base: Path, rel: str):
 
 
 def self_update(status) -> bool:
-    """Если в облаке новый MineSerc.exe — ставит его на место текущего и запускает.
+    """Если в облаке новый MineForFriends.exe — ставит его на место текущего и запускает.
 
     Запущенный exe Windows не даёт перезаписать, но даёт переименовать: старый
-    уезжает в MineSerc.old.exe и удаляется при следующем запуске.
+    уезжает в <имя>.old.exe и удаляется при следующем запуске. Имя файла у игрока
+    не меняется, чтобы не ломать его ярлыки.
     True — новая версия запущена, этот экземпляр нужно закрыть.
     """
     if not getattr(sys, "frozen", False):
@@ -221,7 +239,7 @@ def self_update(status) -> bool:
             return False
         status("Скачиваю новую версию лаунчера…")
         part = exe.with_name(exe.name + ".part")
-        with cloud.get(f"{CLOUD_URL}/MineSerc.exe", stream=True, timeout=30) as r:
+        with cloud.get(f"{CLOUD_URL}/{LAUNCHER_EXE}", stream=True, timeout=30) as r:
             r.raise_for_status()
             with part.open("wb") as f:
                 for chunk in r.iter_content(1 << 16):
@@ -320,11 +338,11 @@ class Updater:
         # Наше облако первым в списке CustomSkinLoader, остальные его настройки не трогаем
         path = game_dir / "CustomSkinLoader" / "CustomSkinLoader.json"
         config = load_json(path, {})
-        ours = {"name": APP_NAME, "type": "CustomSkinAPI", "root": f"{CLOUD_URL}/skins/"}
+        ours = {"name": APP_ID, "type": "CustomSkinAPI", "root": f"{CLOUD_URL}/skins/"}
         loadlist = config.get("loadlist") or []
         if loadlist and loadlist[0] == ours:
             return
-        config["loadlist"] = [ours] + [p for p in loadlist if p.get("name") != APP_NAME]
+        config["loadlist"] = [ours] + [p for p in loadlist if p.get("name") not in (APP_ID, OLD_APP_ID)]
         save_json(path, config)
 
     def upload_skin(self, nick: str, png: Path, slim: bool) -> str:
@@ -759,6 +777,228 @@ def custom_tab(tabs, ui, mc_dir: Path) -> None:
     refresh_list()
 
 
+def hosted_servers() -> list:
+    return load_json(SETTINGS_FILE, {}).get("servers", [])
+
+
+def save_hosted_servers(servers: list) -> None:
+    settings = load_json(SETTINGS_FILE, {})
+    settings["servers"] = servers
+    save_json(SETTINGS_FILE, settings)
+
+
+def server_settings_window(parent, record: dict) -> None:
+    """Окно настроек сервера: server.properties и память в start.bat."""
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    path = Path(record["path"]) / "server.properties"
+    props = {**server_host.DEFAULTS, **server_host.read_properties(path)}
+    win = tk.Toplevel(parent)
+    win.title(f"Настройки сервера — {record['name']}")
+    win.resizable(False, False)
+    win.transient(parent)
+    win.grab_set()
+    box = ttk.Frame(win, padding=14)
+    box.grid()
+    box.columnconfigure(1, weight=1)
+    values = {}
+    row = 0
+    for key, label, kind, choices in server_host.SETTINGS:
+        current = props.get(key, "")
+        if kind == "bool":
+            var = tk.BooleanVar(value=current.lower() == "true")
+            ttk.Checkbutton(box, text=label, variable=var).grid(column=0, row=row, columnspan=2, sticky="w", pady=1)
+        else:
+            ttk.Label(box, text=label + ":").grid(column=0, row=row, sticky="w", pady=2)
+            if kind == "choice":
+                var = tk.StringVar(value=choices.get(current, current))
+                widget = ttk.Combobox(box, textvariable=var, values=list(choices.values()), state="readonly", width=24)
+            elif kind == "int":
+                var = tk.StringVar(value=current)
+                widget = ttk.Spinbox(box, textvariable=var, from_=0, to=65535, width=24)
+            else:
+                var = tk.StringVar(value=current)
+                widget = ttk.Entry(box, textvariable=var, width=26)
+            widget.grid(column=1, row=row, sticky="we", padx=(8, 0), pady=2)
+        values[key] = (var, kind, choices)
+        row += 1
+    ttk.Label(box, text="Память сервера, ГБ:").grid(column=0, row=row, sticky="w", pady=(6, 2))
+    ram_var = tk.StringVar(value=str(record.get("ram", 4)))
+    ttk.Spinbox(box, textvariable=ram_var, from_=1, to=64, width=24).grid(column=1, row=row, sticky="we", padx=(8, 0), pady=(6, 2))
+    row += 1
+    ip = server_host.radmin_ip()
+    hint = f"Друзья подключаются по адресу {ip}:{props.get('server-port')}" if ip else \
+        "Radmin VPN не найден: друзья подключаются по твоему адресу и этому порту"
+    ttk.Label(box, text=hint, foreground="gray", wraplength=360).grid(column=0, row=row, columnspan=2, sticky="w", pady=(8, 0))
+    row += 1
+
+    def save():
+        changes = {}
+        for key, (var, kind, choices) in values.items():
+            value = var.get()
+            if kind == "bool":
+                value = "true" if value else "false"
+            elif kind == "choice":
+                value = next((k for k, v in choices.items() if v == value), value)
+            elif kind == "int":
+                value = str(value).strip()
+                if not value.isdigit():
+                    messagebox.showwarning(APP_NAME, f"«{key}» должно быть числом.", parent=win)
+                    return
+            changes[key] = value
+        changes["query.port"] = changes["server-port"]
+        # Пиратам (TLauncher) мешает проверка подписи чата
+        changes["enforce-secure-profile"] = changes["online-mode"]
+        if not ram_var.get().strip().isdigit():
+            messagebox.showwarning(APP_NAME, "Память — число гигабайт.", parent=win)
+            return
+        try:
+            server_host.write_properties(path, changes)
+            record["ram"] = int(ram_var.get())
+            server_host.write_start(record)
+        except OSError as e:
+            messagebox.showerror(APP_NAME, f"Не удалось сохранить:\n\n{e}", parent=win)
+            return
+        save_hosted_servers([record if s["path"] == record["path"] else s for s in hosted_servers()])
+        win.destroy()
+
+    buttons = ttk.Frame(box)
+    buttons.grid(column=0, row=row, columnspan=2, sticky="e", pady=(12, 0))
+    ttk.Button(buttons, text="Отмена", command=win.destroy).grid(column=0, row=0, padx=(0, 6))
+    ttk.Button(buttons, text="Сохранить", command=save).grid(column=1, row=0)
+
+
+def server_tab(tabs, ui, mc_dir: Path) -> None:
+    """Вкладка «Сервер»: сервер из сборки, установленной во вкладке «Свои сборки»."""
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+
+    tab = ttk.Frame(tabs, padding=10)
+    tabs.add(tab, text="Сервер")
+    tab.columnconfigure(0, weight=1)
+    ttk.Label(tab, text="Собери сервер из сборки, добавленной во вкладке «Свои сборки»: лаунчер перенесёт "
+                        "моды (без клиентских), конфиги и датапаки, поставит серверный загрузчик и Java.",
+              wraplength=330, foreground="gray").grid(row=0, sticky="w")
+
+    box = ttk.LabelFrame(tab, text="Новый сервер", padding=8)
+    box.grid(row=1, pady=(10, 0), sticky="we")
+    box.columnconfigure(1, weight=1)
+    ttk.Label(box, text="Сборка:").grid(column=0, row=0, sticky="w")
+    pack_var = tk.StringVar()
+    pack_box = ttk.Combobox(box, textvariable=pack_var, state="readonly")
+    pack_box.grid(column=1, row=0, sticky="we", padx=(6, 0))
+    eula_var = tk.BooleanVar(value=False)
+    eula_row = ttk.Frame(box)
+    eula_row.grid(column=0, row=1, columnspan=2, sticky="w", pady=(8, 0))
+    ttk.Checkbutton(eula_row, text="Я принимаю", variable=eula_var).grid(column=0, row=0)
+    eula_link = ttk.Label(eula_row, text="EULA Minecraft", foreground="#1565c0", cursor="hand2")
+    eula_link.grid(column=1, row=0)
+    eula_link.bind("<Button-1>", lambda e: webbrowser.open(server_host.EULA_URL))
+    host = ttk.Button(box, text="Захостить сервер…")
+    host.grid(column=0, row=2, columnspan=2, sticky="we", pady=(8, 0))
+    bar = ttk.Progressbar(tab, maximum=1.0)
+    bar.grid(row=2, pady=(10, 2), sticky="we")
+    status_var = tk.StringVar()
+    ttk.Label(tab, textvariable=status_var, wraplength=330).grid(row=3, sticky="w")
+
+    mine = ttk.LabelFrame(tab, text="Мои серверы", padding=8)
+    mine.grid(row=4, pady=(10, 0), sticky="we")
+    mine.columnconfigure((0, 1, 2), weight=1, uniform="srv")
+    listbox = tk.Listbox(mine, height=4, activestyle="none")
+    listbox.grid(column=0, row=0, columnspan=3, sticky="we")
+    start_btn = ttk.Button(mine, text="Запустить")
+    start_btn.grid(column=0, row=1, sticky="we", padx=(0, 3), pady=(6, 0))
+    settings_btn = ttk.Button(mine, text="Настройки…")
+    settings_btn.grid(column=1, row=1, sticky="we", padx=3, pady=(6, 0))
+    folder_btn = ttk.Button(mine, text="Папка")
+    folder_btn.grid(column=2, row=1, sticky="we", padx=(3, 0), pady=(6, 0))
+    forget_btn = ttk.Button(mine, text="Убрать из списка")
+    forget_btn.grid(column=0, row=2, columnspan=3, sticky="we", pady=(6, 0))
+
+    def refresh():
+        profiles = custom_profiles()
+        pack_box.configure(values=[p["name"] for p in profiles])
+        if pack_var.get() not in [p["name"] for p in profiles]:
+            pack_var.set(profiles[-1]["name"] if profiles else "")
+        listbox.delete(0, "end")
+        for s in hosted_servers():
+            port = server_host.read_properties(Path(s["path"]) / "server.properties").get("server-port", "?")
+            listbox.insert("end", f"{s['name']} — порт {port}")
+
+    def build_worker(profile, folder):
+        try:
+            taken = {int(server_host.read_properties(Path(s["path"]) / "server.properties").get("server-port", 0) or 0)
+                     for s in hosted_servers()}
+            # Порт основного сервера MineSerc тоже занят
+            taken.add(int(DEFAULT_PACK["server"].rsplit(":", 1)[1]))
+            record = server_host.build(profile, folder, mc_dir, taken, status=lambda s: ui(status_var.set, s),
+                                       progress=lambda v: ui(bar.configure, {"value": v}))
+            server_host.accept_eula(Path(record["path"]))
+            save_hosted_servers(hosted_servers() + [record])
+            ui(refresh)
+            ui(status_var.set, f"Сервер собран: {record['path']}")
+            ui(server_settings_window, tab.winfo_toplevel(), record)
+        except Exception as e:
+            traceback.print_exc()
+            ui(messagebox.showerror, APP_NAME, f"Не удалось собрать сервер:\n\n{e}")
+            ui(status_var.set, "Ошибка, попробуй ещё раз")
+        ui(host.state, ["!disabled"])
+
+    def on_host():
+        profile = next((p for p in custom_profiles() if p["name"] == pack_var.get()), None)
+        if not profile:
+            messagebox.showwarning(APP_NAME, "Сначала добавь сборку во вкладке «Свои сборки».")
+            return
+        if not eula_var.get():
+            messagebox.showwarning(APP_NAME, "Чтобы запустить сервер Minecraft, нужно принять EULA.")
+            return
+        folder = filedialog.askdirectory(title="Куда положить сервер")
+        if not folder:
+            return
+        host.state(["disabled"])
+        bar.configure(value=0)
+        threading.Thread(target=build_worker, args=(profile, Path(folder)), daemon=True).start()
+
+    def selected():
+        sel = listbox.curselection()
+        return hosted_servers()[sel[0]] if sel else None
+
+    def on_start():
+        s = selected()
+        if s:
+            try:
+                server_host.start(s)
+                status_var.set(f"Сервер «{s['name']}» запускается в отдельном окне.")
+            except (OSError, RuntimeError) as e:
+                messagebox.showerror(APP_NAME, str(e))
+
+    def on_settings():
+        s = selected()
+        if s:
+            server_settings_window(tab.winfo_toplevel(), s)
+
+    def on_folder():
+        s = selected()
+        if s and Path(s["path"]).exists():
+            os.startfile(s["path"])
+
+    def on_forget():
+        s = selected()
+        if s and messagebox.askyesno(APP_NAME, f"Убрать «{s['name']}» из списка?\n\nПапка сервера останется:\n{s['path']}"):
+            save_hosted_servers([x for x in hosted_servers() if x["path"] != s["path"]])
+            refresh()
+
+    host.configure(command=on_host)
+    start_btn.configure(command=on_start)
+    settings_btn.configure(command=on_settings)
+    folder_btn.configure(command=on_folder)
+    forget_btn.configure(command=on_forget)
+    # Список сборок мог измениться во второй вкладке
+    tabs.bind("<<NotebookTabChanged>>", lambda e: refresh(), add="+")
+    refresh()
+
+
 def run_gui() -> None:
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
@@ -773,8 +1013,11 @@ def run_gui() -> None:
     head = ttk.Frame(root, padding=(16, 12, 16, 4))
     head.grid(sticky="we")
     head.columnconfigure(0, weight=1)
-    ttk.Label(head, text="MineSerc", font=("Segoe UI", 18, "bold")).grid(column=0, row=0, pady=(0, 2))
-    ttk.Label(head, text="Сборки и версии для TLauncher").grid(column=0, row=1)
+    title = ttk.Frame(head)
+    title.grid(column=0, row=0, pady=(0, 2))
+    ttk.Label(title, text=APP_ID, font=("Segoe UI", 18, "bold")).grid(column=0, row=0, sticky="s")
+    ttk.Label(title, text=" by TEJKA", font=("Segoe UI", 10, "bold"), foreground="#5d9c3a").grid(column=1, row=0, sticky="s", pady=(0, 4))
+    ttk.Label(head, text="Сборки, серверы и скины для игры с друзьями").grid(column=0, row=1)
     tabs = ttk.Notebook(root, padding=(12, 6, 12, 12))
     tabs.grid(sticky="nswe")
     frm = ttk.Frame(tabs, padding=10)
@@ -819,6 +1062,7 @@ def run_gui() -> None:
         root.after(0, fn, *a)
 
     custom_tab(tabs, ui, probe.mc_dir)
+    server_tab(tabs, ui, probe.mc_dir)
 
     def show_servers(entries, statuses):
         # Индикатор: какой сервер сейчас включён и доступно ли облако со сборками
@@ -969,6 +1213,7 @@ def run_gui() -> None:
 
 if __name__ == "__main__":
     # Отладка: launcher.py --cli [--no-open] [--packs id1,id2]  |  launcher.py --skin <ник> <файл.png> [--slim]
+    migrate_settings()
     if len(sys.argv) >= 4 and sys.argv[1] == "--skin":
         print(Updater(print, lambda v: None).upload_skin(sys.argv[2], Path(sys.argv[3]), "--slim" in sys.argv))
     elif len(sys.argv) >= 2 and sys.argv[1] == "--cli":

@@ -49,7 +49,7 @@ BUILTIN = {"minecraft", "java", "fabricloader", "fabric-loader", "quilt_loader",
 MC_TOKEN = re.compile(r"(?<![\d.])(1\.\d{1,2}(?:\.\d{1,2})?|[2-9]\d\.\d{1,2}(?:\.\d{1,2})?)(?![\d.])")
 
 web = requests.Session()
-web.headers["User-Agent"] = "MineSerc-launcher (github.com/TejkaFan/MineSerc-launcher)"
+web.headers["User-Agent"] = "MineForFriends-launcher (github.com/TejkaFan)"
 
 
 def get_json(url: str, **kw):
@@ -506,8 +506,8 @@ def loader_versions(loader: str, mc: str) -> list:
     return []
 
 
-def find_java(mc_dir: Path):
-    # Java для установщика Forge: своя у TLauncher, рантаймы игры, системная
+def java_candidates(mc_dir: Path) -> list:
+    """Все найденные java.exe: своя у TLauncher, рантаймы игры, системные."""
     appdata = Path(os.environ.get("APPDATA", Path.home()))
     candidates = []
     if os.environ.get("JAVA_HOME"):
@@ -519,7 +519,47 @@ def find_java(mc_dir: Path):
             candidates += sorted(Path(base, vendor).glob("*/bin/java.exe"), reverse=True)
     if which := shutil.which("java"):
         candidates.append(Path(which))
-    return next((c for c in candidates if c.exists()), None)
+    seen, result = set(), []
+    for c in candidates:
+        key = str(c).lower()
+        if key not in seen and c.exists():
+            seen.add(key)
+            result.append(c)
+    return result
+
+
+def java_major(java: Path):
+    """Основная версия Java (8, 17, 21, 25…) по файлу release рядом с ней, иначе по имени папки."""
+    home = java.parent.parent
+    try:
+        text = (home / "release").read_text("utf-8", errors="ignore")
+        version = re.search(r'JAVA_VERSION="([^"]+)"', text).group(1)
+    except (OSError, AttributeError):
+        m = re.search(r"(?:jdk|jre)-?(\d+(?:\.\d+)*)", str(home).lower())
+        if not m:
+            return None
+        version = m.group(1)
+    parts = version.split(".")
+    return int(parts[1]) if parts[0] == "1" and len(parts) > 1 else int(parts[0])
+
+
+def java_full(java: Path) -> bool:
+    """Урезанные Java (как у самого TLauncher) без jdk.zipfs не запускают Fabric и Forge."""
+    try:
+        text = (java.parent.parent / "release").read_text("utf-8", errors="ignore")
+    except OSError:
+        return True
+    modules = re.search(r'^MODULES="([^"]*)"', text, re.M)
+    return not modules or "jdk.zipfs" in modules.group(1)
+
+
+def find_java(mc_dir: Path, need: int = 0):
+    """Полная Java для установщика или сервера: подходящая по версии, ближайшая к нужной."""
+    found = [(java_major(c), c) for c in java_candidates(mc_dir) if java_full(c)]
+    if not need:
+        return found[0][1] if found else None
+    fit = sorted((v, str(c), c) for v, c in found if v and v >= need)
+    return fit[0][2] if fit else None
 
 
 def run_forge_installer(loader: str, mc: str, version: str, mc_dir: Path, status) -> str:

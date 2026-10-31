@@ -10,6 +10,7 @@
 """
 import hashlib
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -108,12 +109,16 @@ def main() -> None:
     PACKS_LIST.write_text(json.dumps({"packs": packs}, ensure_ascii=False, indent=2), "utf-8")
     print(f"Сборок в packs.json: {len(packs)}")
 
-    # По нему лаунчеры друзей сами обновляются до свежего MineSerc.exe
-    exe = CLOUD / "MineSerc.exe"
+    # По нему лаунчеры друзей сами обновляются до свежего MineForFriends.exe
+    exe = CLOUD / "MineForFriends.exe"
     if exe.exists():
         info = {"sha1": sha1(exe), "size": exe.stat().st_size}
         LAUNCHER_INFO.write_text(json.dumps(info), "utf-8")
-        print(f"launcher.json: MineSerc.exe {info['sha1'][:10]}…")
+        # Лаунчеры до переименования качают обновление под старым именем
+        legacy = CLOUD / "MineSerc.exe"
+        if not legacy.exists() or sha1(legacy) != info["sha1"]:
+            shutil.copyfile(exe, legacy)
+        print(f"launcher.json: MineForFriends.exe {info['sha1'][:10]}…")
 
 
 if __name__ == "__main__":
