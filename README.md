@@ -8,7 +8,9 @@
   - дополнительные — `launcher-cloud/packs/<id>/` (все файлы папки игры + `pack.json` с версией, загрузчиком и адресом сервера). Сейчас там `homestead` (Homestead 1.20.1, сервер на порту 25566).
   - Файлы из `"once"` в `pack.json` (например, `options.txt`) кладутся только при первой установке; правки игрока в конфигах живут до следующего обновления этого файла в облаке.
 - `cloud_server.py` — облако на ПК хоста (порт 8518), раздаёт папку `launcher-cloud` и принимает скины игроков (`POST /skins/upload`). В игре скины показывает мод CustomSkinLoader. Токены ников лежат в `skin_tokens.json` (не в git); чтобы сбросить ник, удали его строку оттуда. Запускается из `start.bat`.
-- `update_manifest.py` — пересобирает манифесты всех сборок и `launcher-cloud/packs.json` после любых изменений в облаке.
+- `update_manifest.py` — пересобирает манифесты всех сборок, `launcher-cloud/packs.json` и `launcher-cloud/launcher.json` (хэш свежего `MineSerc.exe`) после любых изменений в облаке.
+- Лаунчер сам обновляется: при запуске сверяет себя с `launcher.json` и, если в облаке новая версия, скачивает её, подменяет свой exe и перезапускается. Друзьям хватает один раз получить `MineSerc.exe`.
+- `make_icon.py` — рисует `icon.ico` (пиксельный блок травы).
 - `get_mods.py` — скачивает моды с Modrinth под Fabric 26.3 вместе с зависимостями.
 
 Эта папка должна лежать в папке сервера рядом с `launcher-cloud/`.
@@ -23,8 +25,9 @@ python -m venv .venv
 ## Сборка MineSerc.exe
 
 ```
-.venv\Scripts\pyinstaller.exe --noconfirm --onefile --windowed --name MineSerc --distpath dist --workpath build --specpath build launcher.py
+.venv\Scripts\pyinstaller.exe --noconfirm --onefile --windowed --name MineSerc --icon "%CD%\icon.ico" --add-data "%CD%\icon.ico;." --exclude-module minecraft_launcher_lib --distpath dist --workpath build --specpath build launcher.py
 copy dist\MineSerc.exe ..\launcher-cloud\MineSerc.exe
+.venv\Scripts\python.exe update_manifest.py
 ```
 
 ## Отладка

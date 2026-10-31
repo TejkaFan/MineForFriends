@@ -38,6 +38,10 @@ DEFAULT_PACK = {
 }
 # Как часто обновлять индикатор серверов, мс
 STATUS_REFRESH = 30_000
+# Описание свежего MineSerc.exe в облаке ({"sha1", "size"}), пишет update_manifest.py
+LAUNCHER_INFO = "launcher.json"
+# Внутри exe ресурсы лежат во временной папке PyInstaller
+RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 
 # К облаку ходим напрямую: системный прокси (VPN-клиенты) не видит сеть Radmin
 cloud = requests.Session()
@@ -192,6 +196,51 @@ def inside(base: Path, rel: str):
     # Путь из манифеста не должен выводить за пределы папки игры
     path = (base / rel).resolve()
     return path if base.resolve() in path.parents else None
+
+
+def self_update(status) -> bool:
+    """Если в облаке новый MineSerc.exe — ставит его на место текущего и запускает.
+
+    Запущенный exe Windows не даёт перезаписать, но даёт переименовать: старый
+    уезжает в MineSerc.old.exe и удаляется при следующем запуске.
+    True — новая версия запущена, этот экземпляр нужно закрыть.
+    """
+    if not getattr(sys, "frozen", False):
+        return False
+    exe = Path(sys.executable)
+    old = exe.with_name(exe.stem + ".old.exe")
+    try:
+        old.unlink(missing_ok=True)
+    except OSError:
+        pass  # прошлый экземпляр ещё закрывается
+    try:
+        info = cloud.get(f"{CLOUD_URL}/{LAUNCHER_INFO}", timeout=5).json()
+        if not info.get("sha1") or sha1(exe) == info["sha1"]:
+            return False
+        status("Скачиваю новую версию лаунчера…")
+        part = exe.with_name(exe.name + ".part")
+        with cloud.get(f"{CLOUD_URL}/MineSerc.exe", stream=True, timeout=30) as r:
+            r.raise_for_status()
+            with part.open("wb") as f:
+                for chunk in r.iter_content(1 << 16):
+                    f.write(chunk)
+        if sha1(part) != info["sha1"]:
+            part.unlink()
+            return False
+        exe.replace(old)
+        try:
+            part.replace(exe)
+        except OSError:
+            old.replace(exe)
+            raise
+    except (requests.RequestException, ValueError, OSError):
+        # Нет облака или нет прав на папку — работаем на текущей версии
+        traceback.print_exc()
+        return False
+    # Новый exe должен распаковаться заново, а не подхватить временную папку этого
+    env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
+    subprocess.Popen([str(exe)], cwd=str(exe.parent), env=env)
+    return True
 
 
 class Updater:
@@ -452,6 +501,10 @@ def run_gui() -> None:
     root = tk.Tk()
     root.title(APP_NAME)
     root.resizable(False, False)
+    try:
+        root.iconbitmap(str(RESOURCES / "icon.ico"))
+    except tk.TclError:
+        pass
     frm = ttk.Frame(root, padding=16)
     frm.grid()
 
@@ -626,6 +679,18 @@ def run_gui() -> None:
     go.configure(command=on_go)
     packs_btn.configure(command=on_packs)
     pick.configure(command=on_pick)
+
+    def self_update_worker():
+        # Пока проверяем версию лаунчера, кнопки сборок неактивны
+        if self_update(lambda s: ui(status_var.set, s)):
+            ui(root.destroy)
+            return
+        ui(go.state, ["!disabled"])
+        ui(packs_btn.state, ["!disabled"])
+
+    go.state(["disabled"])
+    packs_btn.state(["disabled"])
+    threading.Thread(target=self_update_worker, daemon=True).start()
     refresh_servers()
     root.mainloop()
 

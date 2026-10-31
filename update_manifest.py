@@ -17,6 +17,7 @@ CLOUD = Path(__file__).resolve().parent.parent / "launcher-cloud"
 MANIFEST = CLOUD / "manifest.json"
 PACKS_DIR = CLOUD / "packs"
 PACKS_LIST = CLOUD / "packs.json"
+LAUNCHER_INFO = CLOUD / "launcher.json"
 
 # Настройки основной сборки, которые читает лаунчер
 SETTINGS = {
@@ -106,6 +107,13 @@ def main() -> None:
         packs += [extra_pack(d) for d in sorted(PACKS_DIR.iterdir()) if (d / "pack.json").exists()]
     PACKS_LIST.write_text(json.dumps({"packs": packs}, ensure_ascii=False, indent=2), "utf-8")
     print(f"Сборок в packs.json: {len(packs)}")
+
+    # По нему лаунчеры друзей сами обновляются до свежего MineSerc.exe
+    exe = CLOUD / "MineSerc.exe"
+    if exe.exists():
+        info = {"sha1": sha1(exe), "size": exe.stat().st_size}
+        LAUNCHER_INFO.write_text(json.dumps(info), "utf-8")
+        print(f"launcher.json: MineSerc.exe {info['sha1'][:10]}…")
 
 
 if __name__ == "__main__":
