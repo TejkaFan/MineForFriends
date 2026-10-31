@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import traceback
+import webbrowser
 from pathlib import Path
 
 import requests
@@ -20,6 +21,8 @@ import requests
 APP_NAME = "MineSerc"
 CLOUD_URL = "http://26.199.180.115:8518"
 VERSION_ID = "MineSerc 26.3"
+# Каталог скинов: там можно скачать PNG и выбрать его кнопкой «Выбрать скин»
+SKINS_SITE = "https://www.minecraftskins.com/"
 APPDATA = Path(os.environ.get("APPDATA", Path.home()))
 TL_PROPERTIES = APPDATA / ".tlauncher" / "tlauncher-2.0.properties"
 MOJANG_MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
@@ -300,12 +303,21 @@ def run_gui() -> None:
     bar.grid(column=0, row=2, pady=(4, 4))
     status_var = tk.StringVar(value="Нажми «Обновить и открыть TLauncher»")
     ttk.Label(frm, textvariable=status_var, wraplength=340).grid(column=0, row=3, sticky="w")
-    go = ttk.Button(frm, text="Обновить и открыть TLauncher")
-    go.grid(column=0, row=4, pady=(12, 0), sticky="we")
+    actions = ttk.Frame(frm)
+    actions.grid(column=0, row=4, pady=(12, 0), sticky="we")
+    actions.columnconfigure(0, weight=1)
+    go = ttk.Button(actions, text="Обновить и открыть TLauncher")
+    go.grid(column=0, row=0, sticky="we")
+    # Заготовка: позже здесь будет выбор сборок для установки и обновления
+    packs = ttk.Button(actions, text="Сборки…", command=lambda: messagebox.showinfo(
+        APP_NAME, f"Сейчас доступна одна сборка: «{VERSION_ID}» (Fabric).\n\n"
+                  "Выбор других сборок для установки и обновления появится здесь позже."))
+    packs.grid(column=1, row=0, padx=(6, 0))
 
     # Скин: ник как в TLauncher, тип модели и выбор PNG
     skin = ttk.LabelFrame(frm, text="Скин на сервере", padding=8)
     skin.grid(column=0, row=5, pady=(14, 0), sticky="we")
+    skin.columnconfigure(2, weight=1)
     probe = Updater(lambda s: None, lambda v: None)
     nick_var = tk.StringVar(value=load_json(probe.state_file, {}).get("skin_nick") or tlauncher_nick(probe.mc_dir))
     slim_var = tk.BooleanVar(value=False)
@@ -313,8 +325,13 @@ def run_gui() -> None:
     ttk.Entry(skin, textvariable=nick_var, width=24).grid(column=1, row=0, columnspan=2, sticky="we", padx=(6, 0))
     ttk.Radiobutton(skin, text="Обычная модель", variable=slim_var, value=False).grid(column=0, row=1, columnspan=2, sticky="w", pady=(6, 0))
     ttk.Radiobutton(skin, text="Тонкие руки (Алекс)", variable=slim_var, value=True).grid(column=2, row=1, sticky="w", pady=(6, 0))
-    pick = ttk.Button(skin, text="Выбрать скин (PNG)…")
-    pick.grid(column=0, row=2, columnspan=3, pady=(8, 0), sticky="we")
+    buttons = ttk.Frame(skin)
+    buttons.grid(column=0, row=2, columnspan=3, pady=(8, 0), sticky="we")
+    buttons.columnconfigure((0, 1), weight=1, uniform="skin")
+    pick = ttk.Button(buttons, text="Выбрать скин (PNG)…")
+    pick.grid(column=0, row=0, sticky="we", padx=(0, 3))
+    site = ttk.Button(buttons, text="Найти скин на сайте", command=lambda: webbrowser.open(SKINS_SITE))
+    site.grid(column=1, row=0, sticky="we", padx=(3, 0))
 
     def ui(fn, *a):
         root.after(0, fn, *a)
