@@ -28,9 +28,10 @@ import webview
 import custom_packs
 from cloud_server import MAX_SKIN, NICK_RE, png_size, valid_skin_size
 import server_host
+import share
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.6"
+APP_VERSION = "0.7"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -454,10 +455,10 @@ class Updater:
         save_json(self.state_file, state)
         return f"{message} для {nick}. В игре он появится через несколько минут, после перезахода."
 
-    def download(self, url_path: str, dest: Path, expected_sha1: str) -> None:
+    def download(self, url: str, dest: Path, expected_sha1: str) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + ".part")
-        with cloud.get(f"{CLOUD_URL}/{requests.utils.quote(url_path)}", stream=True, timeout=30) as r:
+        with cloud.get(url, stream=True, timeout=30) as r:
             r.raise_for_status()
             with tmp.open("wb") as f:
                 for chunk in r.iter_content(1 << 16):
@@ -512,7 +513,9 @@ class Updater:
         done = 0
         for i, f in enumerate(todo, 1):
             self.status(f"{name}: скачиваю {Path(f['path']).name} ({i}/{len(todo)}, {done / 2**20:.0f} из {total / 2**20:.0f} МБ)")
-            self.download(pack["base"] + f["path"], inside(game_dir, f["path"]), f["sha1"])
+            # Сборки друзей качаются с ПК хоста, остальные — из облака
+            root = pack.get("root") or CLOUD_URL
+            self.download(f"{root}/{requests.utils.quote(pack['base'] + f['path'])}", inside(game_dir, f["path"]), f["sha1"])
             if f["path"] not in once:
                 recorded[f["path"]] = f["sha1"]
             done += f["size"]
@@ -568,13 +571,68 @@ class Updater:
             return True
         return False
 
+    def install_shared(self, entry: dict) -> str:
+        """Сборка сервера друга из Radmin: качается с его ПК и каждый раз подгоняется под его сервер."""
+        name, host = entry["name"], entry["host"]
+        self.status(f"{name}: получаю список файлов у {host}…")
+        try:
+            r = cloud.get(share.url(entry["ip"], entry["id"]) + "/manifest", timeout=120)
+            r.raise_for_status()
+            files = r.json()["files"]
+        except (requests.RequestException, ValueError, KeyError) as e:
+            raise RuntimeError(f"Не удалось получить сборку «{name}» у {host}.\n\nПроверь, что Radmin VPN "
+                               f"включён и сервер ещё запущен.\n\n{e}") from None
+        version_id = custom_packs.safe_name(f"{name} ({host})")
+        game_dir = self.mc_dir / "friends" / custom_packs.slug(f"{host}-{entry['id']}")
+        game_dir.mkdir(parents=True, exist_ok=True)
+        ensure_server(game_dir / "servers.dat", name, f"{entry['ip']}:{entry['port']}")
+
+        # Версия в TLauncher: пересобираем, только если хост сменил Minecraft или загрузчик
+        state_file = game_dir / "launcher_state.json"
+        state = load_json(state_file, {})
+        key = f"{entry['minecraft']}|{entry['loader']}|{entry['loader_version']}|{version_id}"
+        json_path = self.mc_dir / "versions" / version_id / f"{version_id}.json"
+        if state.get("version_key") != key or not json_path.exists():
+            self.status(f"{name}: ставлю {loader_title(entry) if entry['loader'] != 'vanilla' else 'Minecraft ' + entry['minecraft']}…")
+            version = custom_packs.build_version(version_id, entry["minecraft"], entry["loader"],
+                                                 entry["loader_version"], game_dir, self.mc_dir, self.status)
+            save_json(json_path, version)
+            state["version_key"] = key
+            save_json(state_file, state)
+
+        self.sync_pack({"name": name, "files": files, "once": [], "base": "",
+                        "root": share.url(entry["ip"], entry["id"]) + "/files"}, game_dir)
+        setup_skin_loader(game_dir)
+        return version_id
+
     def run(self, open_tl: bool = True, pack_ids: list = None) -> str:
         ids = pack_ids or selected_packs()
-        chosen = [e for e in self.fetch_packs() if e["id"] in ids]
-        if not chosen:
+        versions, notes = [], []
+
+        # Свои серверы: сборка уже стоит, добавляем сервер в список серверов игры
+        for s in shared_servers():
+            if f"own:{s['id']}" in ids:
+                ensure_server(Path(s["game_dir"]) / "servers.dat", s["name"], f"localhost:{s['port']}")
+                versions.append(s["version_id"])
+        # Серверы друзей из Radmin
+        friends = [i for i in ids if i.startswith("radmin:")]
+        if friends:
+            found = {e["key"]: e for e in friend_servers()}
+            for key in friends:
+                if key in found:
+                    versions.append(self.install_shared(found[key]))
+
+        chosen = []
+        if any(":" not in i for i in ids):
+            try:
+                chosen = [e for e in self.fetch_packs() if e["id"] in ids]
+            except RuntimeError:
+                if not versions:
+                    raise
+                notes.append("Облако недоступно, наши сборки не обновлены.")
+        if not chosen and not versions:
             raise RuntimeError("Не выбрано ни одной сборки. Отметь нужные карточки на вкладке «Наши серверы».")
 
-        versions, notes = [], []
         for entry in chosen:
             self.status(f"{entry['name']}: получаю список файлов…")
             pack = normalize_pack(entry, self.fetch_json(entry["manifest"]))
@@ -612,6 +670,67 @@ def save_hosted_servers(servers: list) -> None:
     settings = load_json(SETTINGS_FILE, {})
     settings["servers"] = servers
     save_json(SETTINGS_FILE, settings)
+
+
+def shared_servers() -> list:
+    """Свои серверы так, как их раздаёт share.py: сборка — профиль, из которого собран сервер."""
+    profiles = {p["version_id"]: p for p in custom_profiles()}
+    result = []
+    for s in hosted_servers():
+        profile = profiles.get(s.get("pack"))
+        if not profile:
+            continue
+        port = server_host.read_properties(Path(s["path"]) / "server.properties").get("server-port") or "25565"
+        result.append({"id": Path(s["path"]).name, "name": s["name"], "minecraft": s.get("minecraft", ""),
+                       "loader": s.get("loader", ""), "loader_version": s.get("loader_version", ""),
+                       "port": int(port), "game_dir": profile["game_dir"], "version_id": profile["version_id"]})
+    return result
+
+
+def loader_title(s: dict) -> str:
+    return f"{custom_packs.LOADER_NAMES.get(s.get('loader'), s.get('loader', ''))} {s.get('minecraft', '')}".strip()
+
+
+def friend_hosts() -> list:
+    # Адреса, добавленные вручную: на случай, если поиск по сети Radmin не дошёл
+    return load_json(SETTINGS_FILE, {}).get("friend_hosts", [])
+
+
+def friend_servers() -> list:
+    """Серверы друзей, запущенные через лаунчер и видные по Radmin. key — id карточки."""
+    own = server_host.radmin_ip()
+    hosts = share.find_hosts() | {h for h in friend_hosts() if h != own}
+    found = []
+    threads = [threading.Thread(target=lambda h=h: found.extend(share.host_servers(cloud, h))) for h in hosts]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    for entry in found:
+        entry["key"] = f"radmin:{entry['ip']}:{entry['id']}"
+    return sorted(found, key=lambda e: (e["host"].lower(), e["name"].lower()))
+
+
+def start_sharing() -> None:
+    """Запускает фоновую раздачу своих сборок друзьям; если она уже идёт, второй процесс сам закроется."""
+    if not shared_servers():
+        return
+    if getattr(sys, "frozen", False):
+        args = [sys.executable, "--share"]
+    else:
+        args = [sys.executable, str(Path(__file__).resolve()), "--share"]
+    env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
+    subprocess.Popen(args, env=env, cwd=str(SETTINGS_FILE.parent), close_fds=True,
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+
+
+def run_sharing() -> None:
+    if not shared_servers():
+        return
+    state = load_json(minecraft_dir() / DEFAULT_PACK["game_dir"] / "launcher_state.json", {})
+    nick = state.get("skin_nick") or tlauncher_nick(minecraft_dir()) or socket.gethostname()
+    host = share.Host(shared_servers, nick, SETTINGS_FILE.parent / "share_cache.json")
+    share.serve(host, lambda: any(server_status(f"127.0.0.1:{s['port']}", 2) for s in shared_servers()))
 
 
 def build_id() -> str:
@@ -687,6 +806,8 @@ class Api:
             return
         self._booted = True
         threading.Thread(target=self._watch_servers, daemon=True).start()
+        # Сервер мог быть запущен и без лаунчера (start.bat): раздача сама дождётся его или закроется
+        start_sharing()
         if not tlauncher_exe():
             self._watch_tlauncher()  # игрок может поставить TLauncher и без нашей кнопки
         if self_update(self._status("boot")):
@@ -738,21 +859,51 @@ class Api:
             time.sleep(STATUS_REFRESH / 1000)
 
     def _servers(self) -> dict:
-        # Индикатор: какой сервер сейчас включён и доступно ли облако со сборками
+        # Индикатор: сборки из облака, свои серверы и серверы друзей в Radmin, какие из них включены
+        cards = []
         try:
-            entries = Updater(lambda s: None, lambda v: None).fetch_packs()
+            for e in Updater(lambda s: None, lambda v: None).fetch_packs():
+                cards.append({"id": e["id"], "name": e["name"], "description": e.get("description", ""),
+                              "size": e.get("size"), "address": e.get("server") or DEFAULT_PACK["server"]})
+            cloud_ok = True
         except Exception:
-            return {"cloud": False, "packs": [], "selected": selected_packs()}
+            cloud_ok = False
+        for s in shared_servers():
+            cards.append({"id": f"own:{s['id']}", "name": s["name"], "kind": "own", "address": f"127.0.0.1:{s['port']}",
+                          "description": f"Твой сервер · {loader_title(s)}"})
+        for e in friend_servers():
+            cards.append({"id": e["key"], "name": e["name"], "kind": "friend", "address": f"{e['ip']}:{e['port']}",
+                          "description": f"Сервер {e['host']} · {loader_title(e)}"})
         results = {}
-        threads = [threading.Thread(target=lambda e=e: results.__setitem__(
-            e["id"], server_status(e.get("server") or DEFAULT_PACK["server"]))) for e in entries]
+        threads = [threading.Thread(target=lambda c=c: results.__setitem__(c["id"], server_status(c["address"])))
+                   for c in cards]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
-        packs = [{"id": e["id"], "name": e["name"], "description": e.get("description", ""), "size": e.get("size"),
-                  "status": results.get(e["id"])} for e in entries]
-        return {"cloud": True, "packs": packs, "selected": selected_packs()}
+        for c in cards:
+            c["status"] = results.get(c["id"])
+        return {"cloud": cloud_ok, "packs": cards, "selected": selected_packs()}
+
+    def refresh_servers(self) -> None:
+        self._emit("servers", self._servers())
+
+    def friend_hosts(self) -> list:
+        return friend_hosts()
+
+    def save_friend_hosts(self, hosts: list) -> None:
+        clean = []
+        for h in hosts:
+            h = h.strip().split(":")[0]
+            if not h:
+                continue
+            if not re.fullmatch(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})", h) or any(int(p) > 255 for p in h.split(".")):
+                raise RuntimeError(f"«{h}» — не похоже на адрес. Нужен адрес Radmin вида 26.123.45.67.")
+            if h not in clean:
+                clean.append(h)
+        settings = load_json(SETTINGS_FILE, {})
+        settings["friend_hosts"] = clean
+        save_json(SETTINGS_FILE, settings)
 
     def set_selected(self, ids: list) -> None:
         save_selected_packs(ids)
@@ -897,7 +1048,9 @@ class Api:
     def start_server(self, path: str) -> str:
         record = self._server(path)
         server_host.start(record)
-        return f"Сервер «{record['name']}» запускается в отдельном окне."
+        start_sharing()
+        return (f"Сервер «{record['name']}» запускается в отдельном окне. Друзья в Radmin увидят его в лаунчере "
+                f"на вкладке «Наши серверы». Если Windows спросит про доступ MineForFriends к сети — разреши.")
 
     def forget_server(self, path: str) -> None:
         save_hosted_servers([s for s in hosted_servers() if s["path"] != path])
@@ -962,8 +1115,11 @@ def run_gui() -> None:
 
 if __name__ == "__main__":
     # Отладка: launcher.py --cli [--no-open] [--packs id1,id2]  |  launcher.py --skin <ник> <файл.png> [--slim]
+    # --share — фоновая раздача сборок своих серверов друзьям (запускает сам лаунчер)
     migrate_settings()
-    if len(sys.argv) >= 4 and sys.argv[1] == "--skin":
+    if len(sys.argv) >= 2 and sys.argv[1] == "--share":
+        run_sharing()
+    elif len(sys.argv) >= 4 and sys.argv[1] == "--skin":
         print(Updater(print, lambda v: None).upload_skin(sys.argv[2], Path(sys.argv[3]), "--slim" in sys.argv))
     elif len(sys.argv) >= 2 and sys.argv[1] == "--cli":
         ids = sys.argv[sys.argv.index("--packs") + 1].split(",") if "--packs" in sys.argv else None

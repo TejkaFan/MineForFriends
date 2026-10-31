@@ -126,7 +126,7 @@ function setNick(nick) {
 function renderServers(d) {
   Object.assign(state, {packs: d.packs, cloud: d.cloud, selected: d.selected});
   const line = $("#cloud-line");
-  if (!d.cloud) {
+  if (!d.cloud && !d.packs.length) {
     line.className = "line err";
     line.textContent = "Облако недоступно — сборки сейчас не загрузить. Проверь Radmin VPN или подожди, пока хост включит сервер.";
     $("#cards").innerHTML = "";
@@ -134,7 +134,9 @@ function renderServers(d) {
     return;
   }
   line.className = "line muted";
-  line.textContent = "Нажми на карточку, чтобы ставить и обновлять эту сборку. Индикатор обновляется сам.";
+  line.textContent = d.cloud
+    ? "Нажми на карточку, чтобы ставить и обновлять эту сборку. Индикатор обновляется сам."
+    : "Наше облако недоступно — показаны серверы, запущенные через лаунчер в Radmin.";
   $("#cards").innerHTML = d.packs.map(p => {
     const st = p.status;
     const on = state.selected.includes(p.id);
@@ -142,7 +144,7 @@ function renderServers(d) {
     const fill = st && st.max ? Math.min(100, Math.round(st.online / st.max * 100)) : 0;
     const who = st
       ? `<div class="who online">${icon("users")}Игроков: ${st.online} / ${st.max}</div>`
-      : `<div class="who off">${icon("moon")}Хост сейчас не играет</div>`;
+      : `<div class="who off">${icon("moon")}${p.kind === "own" ? "Сервер не запущен" : "Хост сейчас не играет"}</div>`;
     return `<div class="card${on ? " on" : ""}" data-id="${esc(p.id)}">
       <div class="top"><span class="name">${esc(p.name)}</span><span class="badge${st ? " online" : ""}">${st ? "онлайн" : "выключен"}</span></div>
       <div class="desc">${esc([p.description, size].filter(Boolean).join(" · "))}</div>
@@ -156,10 +158,10 @@ function renderServers(d) {
 
 function updatePlay() {
   const chosen = state.packs.filter(p => state.selected.includes(p.id)).map(p => `«${p.name}»`);
-  $("#play-btn").disabled = !state.ready || !state.cloud || !chosen.length || state.busy || !state.tlauncher;
+  $("#play-btn").disabled = !state.ready || !chosen.length || state.busy || !state.tlauncher;
   if (!state.ready || state.busy) return;
   $("#play-hint").textContent = !state.tlauncher ? "Сначала установи TLauncher"
-    : !state.cloud ? "Нет связи с облаком"
+    : !state.packs.length ? "Нет связи с облаком"
     : chosen.length ? `Обновит ${chosen.join(", ")} и откроет TLauncher`
     : "Отметь хотя бы одну сборку";
 }
@@ -186,6 +188,30 @@ async function play() {
     state.busy = false;
     updatePlay();
     showError(errText(e));
+  }
+}
+
+// Серверы друзей находятся сами через Radmin; адрес вручную — если поиск по сети не дошёл
+async function friendHosts() {
+  const hosts = await api().friend_hosts();
+  const save = async body => {
+    try {
+      await api().save_friend_hosts($("#friend-hosts", body).value.split(/[\s,;]+/));
+      return true;
+    } catch (e) {
+      $("#friend-err", body).textContent = errText(e);
+      return false;
+    }
+  };
+  const html = `<p class="muted">Серверы, запущенные через лаунчер, появляются здесь сами, если ты и хост в одной сети Radmin.
+      Если сервер друга не появился — впиши его адрес Radmin (виден у друга в Radmin VPN), по одному в строке.</p>
+    <textarea id="friend-hosts" placeholder="26.123.45.67">${esc(hosts.join("\n"))}</textarea>
+    <div class="hint" id="friend-err"></div>`;
+  const ok = await dialog({title: "Серверы друзей", html,
+    buttons: [{label: "Отмена", value: false}, {label: "Сохранить", value: true, primary: true, check: save}]});
+  if (ok) {
+    $("#cloud-line").textContent = "Ищу серверы друзей…";
+    api().refresh_servers();
   }
 }
 
@@ -665,6 +691,7 @@ function bind() {
   };
   $("#play-btn").onclick = play;
   $("#tl-install").onclick = installTlauncher;
+  $("#friend-add").onclick = friendHosts;
   $("#pick-dir").onclick = () => pickPack("dir");
   $("#pick-zip").onclick = () => pickPack("zip");
   for (const r of $$("input[name=mc-mode]")) r.onchange = () => { setCustomBusy(false); refreshLoader(); };

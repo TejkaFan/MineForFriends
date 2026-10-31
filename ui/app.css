@@ -77,6 +77,13 @@ header { display: flex; align-items: center; gap: 12px; padding: 16px 0 14px; }
 .page.active { display: flex; }
 .line { font-size: 12px; }
 .line.err { color: var(--red); background: var(--red-bg); padding: 10px 12px; border-radius: 9px; }
+.line-row { display: flex; align-items: center; gap: 12px; }
+.line-row .line { flex: 1; }
+.link { border: 0; background: none; color: var(--green); font: inherit; font-size: 12px; cursor: pointer; padding: 0;
+  white-space: nowrap; }
+.link:hover { text-decoration: underline; }
+textarea { width: 100%; min-height: 90px; resize: vertical; background: #0e1014; color: var(--text); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; font: inherit; }
 
 /* Плашка «TLauncher не установлен» */
 .notice { display: flex; align-items: center; gap: 14px; background: #2b2615; border: 1px solid #5c4d1f; border-radius: 11px;
@@ -87,7 +94,7 @@ header { display: flex; align-items: center; gap: 12px; padding: 16px 0 14px; }
 .notice .btn { white-space: nowrap; }
 
 /* Карточки серверов */
-.cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; overflow: auto; max-height: 300px; }
+.cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; overflow: auto; max-height: 410px; align-content: start; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 11px; padding: 14px 15px 12px; display: flex;
   flex-direction: column; gap: 7px; cursor: pointer; transition: border-color .15s; }
 .card:hover { border-color: #3a414c; }
