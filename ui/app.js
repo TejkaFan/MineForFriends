@@ -62,7 +62,32 @@ function dialog({title, text = "", html = null, buttons = [{label: "Понятн
 }
 
 const showInfo = (title, text) => dialog({title, text});
-const showError = text => dialog({title: "Что-то пошло не так", text});
+// Сбои лаунчер отправляет автору сам; остальные ошибки игрок может отправить кнопкой
+async function showError(text) {
+  const sent = text.includes("Отчёт об ошибке уже отправлен");
+  const choice = await dialog({title: "Что-то пошло не так", text, buttons: sent
+    ? [{label: "Понятно", value: null, primary: true}]
+    : [{label: "Отправить отчёт", value: "report"}, {label: "Понятно", value: null, primary: true}]});
+  if (choice === "report") sendReport(text);
+}
+
+async function sendReport(text) {
+  let message;
+  try {
+    message = await api().send_report(text);
+  } catch (e) {
+    message = errText(e);
+  }
+  showInfo("Отчёт", message);
+}
+
+// Ошибки самого интерфейса. Ошибки из Python (RuntimeError) уже показаны игроку или отправлены
+function reportJs(error, fallback) {
+  if (!window.pywebview?.api?.report_js || error?.name === "RuntimeError") return;
+  api().report_js(String(error?.message || fallback || error), String(error?.stack || "")).catch(() => {});
+}
+window.addEventListener("error", e => reportJs(e.error, `${e.message} (${e.filename}:${e.lineno})`));
+window.addEventListener("unhandledrejection", e => reportJs(e.reason));
 const confirmBox = (title, text, yes) =>
   dialog({title, text, buttons: [{label: "Отмена", value: false}, {label: yes, value: true, primary: true}]});
 
@@ -588,12 +613,15 @@ function about() {
       <span>Облако</span><span>${esc(i.cloud_url)}</span>
       <span>Папка Minecraft</span><span>${esc(i.mc_dir)}</span>
       <span>Настройки</span><span>${esc(i.settings_dir)}</span>
+      <span>Отчёты</span><span class="text">Сбои лаунчера сами уходят автору: описание ошибки и лог, без имени пользователя Windows</span>
     </div>
     <div class="credits"><h4 class="px">Credits</h4><div class="kv">${credits}</div></div>`;
   dialog({title: "MineForFriends by TEJKA", html, buttons: [
-    {label: "Папка Minecraft", value: "mc"}, {label: "Закрыть", value: null, primary: true},
+    {label: "Отправить лог", value: "report"}, {label: "Папка Minecraft", value: "mc"},
+    {label: "Закрыть", value: null, primary: true},
   ]}).then(v => {
     if (v === "mc") api().open_folder(i.mc_dir);
+    if (v === "report") sendReport("Отчёт игрока из окна «О лаунчере»");
   });
   $("#modal-body").onclick = async e => {
     const a = e.target.closest("a");

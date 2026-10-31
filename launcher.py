@@ -7,6 +7,7 @@
 Интерфейс — HTML-страница из папки ui/ в окне pywebview (WebView2).
 """
 import base64
+import functools
 import hashlib
 import json
 import os
@@ -27,11 +28,12 @@ import webview
 
 import custom_packs
 from cloud_server import MAX_SKIN, NICK_RE, png_size, valid_skin_size
+import reports
 import server_host
 import share
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.7"
+APP_VERSION = "0.8"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -767,7 +769,10 @@ class Api:
             pass  # окно уже закрыто
 
     def _status(self, scope: str):
-        return lambda text: self._emit("status", {"scope": scope, "text": text})
+        def status(text):
+            print(f"[{scope}] {text}")  # в лог: по нему видно, на каком шаге случилась ошибка
+            self._emit("status", {"scope": scope, "text": text})
+        return status
 
     def _progress(self, scope: str):
         last = [-1.0]
@@ -1104,6 +1109,39 @@ class Api:
             return None
         return {"found": True, "skin": base64.b64encode(png.content).decode(), "model": model}
 
+    # ---- Отчёты об ошибках
+
+    def send_report(self, text: str) -> str:
+        # Игрок сам нажал «Отправить отчёт» под ошибкой или в «О лаунчере»
+        first = text.strip().splitlines()[0] if text.strip() else "Отчёт игрока"
+        return reports.send("manual", first, text, reports.signature("manual", first), auto=False)
+
+    def report_js(self, message: str, stack: str) -> None:
+        print(f"Ошибка интерфейса: {message}\n{stack}")
+        threading.Thread(target=reports.send, args=("js", message, f"{message}\n\n{stack}",
+                                                    reports.signature("js", message)), daemon=True).start()
+
+
+def _guarded(method):
+    # Понятные ошибки (RuntimeError) показываем игроку как есть, остальное — сбой: отчёт уходит сам
+    @functools.wraps(method)
+    def call(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except RuntimeError as e:
+            print(f"{method.__name__}: {e}")
+            raise
+        except Exception as e:
+            reports.crash(e)
+            raise RuntimeError(f"В лаунчере что-то сломалось ({type(e).__name__}: {e}).\n\n"
+                               "Отчёт об ошибке уже отправлен автору.") from None
+    return call
+
+
+for _name, _method in list(vars(Api).items()):
+    if callable(_method) and not _name.startswith("_"):
+        setattr(Api, _name, _guarded(_method))
+
 
 def run_gui() -> None:
     api = Api()
@@ -1117,7 +1155,9 @@ if __name__ == "__main__":
     # Отладка: launcher.py --cli [--no-open] [--packs id1,id2]  |  launcher.py --skin <ник> <файл.png> [--slim]
     # --share — фоновая раздача сборок своих серверов друзьям (запускает сам лаунчер)
     migrate_settings()
-    if len(sys.argv) >= 2 and sys.argv[1] == "--share":
+    sharing = len(sys.argv) >= 2 and sys.argv[1] == "--share"
+    reports.setup(SETTINGS_FILE.parent, APP_VERSION, build_id(), "share" if sharing else "launcher")
+    if sharing:
         run_sharing()
     elif len(sys.argv) >= 4 and sys.argv[1] == "--skin":
         print(Updater(print, lambda v: None).upload_skin(sys.argv[2], Path(sys.argv[3]), "--slim" in sys.argv))

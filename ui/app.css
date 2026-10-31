@@ -226,6 +226,7 @@ input[type=radio], input[type=checkbox] { accent-color: var(--green-2); margin: 
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 12px; }
 .kv span:nth-child(odd) { color: var(--muted); }
 .kv span:nth-child(even) { user-select: text; word-break: break-all; }
+.kv span.text { word-break: normal; }
 .credits { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px; }
 .credits h4 { margin: 0 0 8px; font-size: 9px; color: var(--white); }
 .credits a { cursor: pointer; text-decoration: none; }
