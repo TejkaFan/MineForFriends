@@ -31,6 +31,8 @@ FORGE_PROMOS = "https://files.minecraftforge.net/net/minecraftforge/forge/promot
 FORGE_MAVEN = "https://maven.minecraftforge.net/net/minecraftforge/forge"
 NEOFORGE_MAVEN = "https://maven.neoforged.net/releases/net/neoforged/neoforge"
 MODRINTH = "https://api.modrinth.com/v2"
+# Проект на Modrinth мода, который показывает скины игроков с нашего GitHub
+SKIN_LOADER = "customskinloader"
 CURSEFORGE_FILE = "https://www.curseforge.com/api/v1/mods/{project}/files/{file}/download"
 
 # Что не переносим из сборки в папку игры: служебные файлы лаунчеров, логи, кэши
@@ -678,6 +680,26 @@ def modrinth_file(project: str, loader: str, mc: str):
     return f["url"], f["filename"], f["hashes"].get("sha1"), deps
 
 
+def ensure_skin_loader(game_dir: Path, loader: str, mc: str, status):
+    """Докачивает мод CustomSkinLoader, если его нет в сборке: через него видны скины игроков.
+
+    Возвращает текст для заметок, если поставить не вышло, иначе None.
+    """
+    mods = game_dir / "mods"
+    if any(SKIN_LOADER in p.name.lower() for p in mods.glob("*.jar")):
+        return None
+    status("Скачиваю мод скинов CustomSkinLoader…")
+    found = modrinth_file(SKIN_LOADER, loader, mc)
+    if not found:
+        return f"CustomSkinLoader для Minecraft {mc} не нашёлся — скины игроков в этой сборке видны не будут."
+    url, name, sha, _ = found
+    try:
+        download_file(url, mods / name, sha)
+    except (requests.RequestException, RuntimeError, OSError):
+        return "CustomSkinLoader не скачался — скины игроков в этой сборке видны не будут. Переустанови сборку позже."
+    return None
+
+
 def resolve_missing(missing: dict, loader: str, mc: str, status) -> tuple:
     """Ищет недостающие зависимости на Modrinth; возвращает (загрузки, не найденные)."""
     downloads, not_found, seen = [], [], set()
@@ -741,6 +763,9 @@ def install(plan: dict, mc_dir: Path, status, progress) -> dict:
         metas = [mod_meta(p.read_bytes()) for p in (game_dir / "mods").glob("*.jar")]
         extra, not_found = resolve_missing(missing_deps(metas), loader, mc, status)
         failed += fetch_all(extra, game_dir, status, lambda v: progress(0.7 + 0.1 * v))
+        skin_note = ensure_skin_loader(game_dir, loader, mc, status)
+    else:
+        skin_note = "В сборке без модов скины игроков не видны: для них нужен мод CustomSkinLoader."
 
     # Версия в TLauncher
     version = build_version(version_id, mc, loader, loader_version, game_dir, mc_dir, status)
@@ -757,6 +782,8 @@ def install(plan: dict, mc_dir: Path, status, progress) -> dict:
         notes.append("Не нашёл на Modrinth: " + ", ".join(not_found[:8]) + (" и др." if len(not_found) > 8 else ""))
     if failed:
         notes.append("Не скачались: " + ", ".join(failed[:8]) + (" и др." if len(failed) > 8 else ""))
+    if skin_note:
+        notes.append(skin_note)
     return {"name": version_id, "version_id": version_id, "game_dir": str(game_dir), "minecraft": mc,
             "loader": loader, "loader_version": loader_version, "notes": notes}
 

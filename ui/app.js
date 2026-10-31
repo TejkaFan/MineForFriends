@@ -483,7 +483,7 @@ async function loadServerSkin() {
   // Скина на сервере нет или облако недоступно — показываем последнюю загруженную копию
   Object.assign(skin, {b64: state.info.skin, source: "local"});
   setModel(state.info.skin_model);
-  setSkinTag(!res ? "Облако недоступно — показан последний загруженный скин"
+  setSkinTag(!res ? "Нет связи с сервером скинов — показан последний загруженный скин"
     : `На сервере у ${nick || "этого ника"} стандартный скин`);
   renderSkin();
 }
@@ -579,6 +579,62 @@ function about() {
   };
 }
 
+// ---------- Что нового ----------
+
+// Описание релиза на GitHub (Markdown) → HTML. Строки про скачивание, установку и Credits
+// нужны только на странице релиза, в лаунчере их пропускаем.
+function notesHtml(md) {
+  const inline = s => esc(s)
+    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/`(.+?)`/g, "<code>$1</code>")
+    .replace(/\[(.+?)\]\((https?:[^)\s]+)\)/g, '<a data-url="$2">$1</a>');
+  const out = [];
+  let list = null, skip = false;
+  const closeList = () => { if (list) out.push(`<ul>${list.join("")}</ul>`); list = null; };
+  for (const raw of md.split(/\r?\n/)) {
+    const line = raw.trim();
+    const head = line.match(/^(?:\*\*(.+?)\*\*|#+\s*(.+))$/);
+    if (head) {
+      closeList();
+      const title = head[1] || head[2];
+      skip = /установить/i.test(title);
+      if (!skip && !/что нового/i.test(title)) out.push(`<h5>${inline(title)}</h5>`);
+      continue;
+    }
+    if (!line) { closeList(); skip = false; continue; }
+    if (skip || /^(\*\*)?(Скачать|Credits)/i.test(line)) continue;
+    const item = line.match(/^(?:[-*]|\d+\.)\s+(.*)$/);
+    if (item) (list ??= []).push(`<li>${inline(item[1])}</li>`);
+    else { closeList(); out.push(`<p>${inline(line)}</p>`); }
+  }
+  closeList();
+  return out.join("");
+}
+
+function formatDate(iso) {
+  const [y, m, d] = iso.split("-");
+  return d ? `${d}.${m}.${y}` : "";
+}
+
+async function changelog(title = "Что нового") {
+  dialog({title, html: '<div class="muted">Загружаю список обновлений…</div>', wide: true,
+          buttons: [{label: "Закрыть", value: null, primary: true}]});
+  const body = $("#modal-body");
+  body.onclick = e => {
+    const a = e.target.closest("a[data-url]");
+    if (a) api().open_url(a.dataset.url);
+  };
+  try {
+    const releases = await api().releases();
+    body.innerHTML = releases.length ? releases.map(r => `<div class="release">
+        <div class="rhead"><span class="px">${esc(r.version)}</span>${r.version === state.info.version
+          ? '<span class="rtag">у тебя</span>' : ""}<span class="rdate">${formatDate(r.date)}</span></div>
+        ${notesHtml(r.notes)}</div>`).join("") : '<div class="muted">Обновлений пока нет.</div>';
+  } catch (e) {
+    body.innerHTML = `<div class="muted">${esc(errText(e))}</div>`;
+  }
+}
+
 // ---------- Старт ----------
 
 // События из Python
@@ -598,6 +654,7 @@ window.app = {
 function bind() {
   paintIcons();
   for (const b of $$(".nav[data-page]")) b.onclick = () => go(b.dataset.page);
+  $("#news-btn").onclick = () => changelog();
   $("#about-btn").onclick = about;
   $("#player-chip").onclick = () => go("skin");
   $("#win-min").onclick = () => api().minimize();
@@ -649,6 +706,7 @@ async function start() {
   $("#skin-anim").innerHTML = icon("player-pause");
   loadServerSkin();
   loadProfiles();
+  if (info.updated) changelog(`Лаунчер обновлён до ${info.version}`);
   api().boot();
 }
 

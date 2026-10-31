@@ -30,7 +30,7 @@ from cloud_server import MAX_SKIN, NICK_RE, png_size, valid_skin_size
 import server_host
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.5.5 beta"
+APP_VERSION = "0.6"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -62,6 +62,12 @@ STATUS_REFRESH = 30_000
 LAUNCHER_INFO = "launcher.json"
 # Последний релиз на GitHub: основной источник обновлений лаунчера, работает и без Radmin
 GITHUB_LATEST = "https://api.github.com/repos/TejkaFan/MineForFriends/releases/latest"
+# Список обновлений — описания релизов; последний полученный хранится на случай без интернета
+GITHUB_RELEASES = "https://api.github.com/repos/TejkaFan/MineForFriends/releases?per_page=20"
+RELEASES_CACHE = SETTINGS_FILE.parent / "releases.json"
+# Скины: читает их CustomSkinLoader прямо с GitHub, а загружает Cloudflare Worker (skins-worker/)
+SKINS_ROOT = "https://raw.githubusercontent.com/TejkaFan/MineForFriends-skins/main/skins/"
+SKINS_UPLOAD = "https://mineforfriends-skins.inkiandmelon.workers.dev/upload"
 # Внутри exe ресурсы лежат во временной папке PyInstaller
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 
@@ -197,6 +203,19 @@ def minecraft_dir() -> Path:
     return APPDATA / ".minecraft"
 
 
+def setup_skin_loader(game_dir: Path) -> None:
+    # Наши скины с GitHub первыми в списке CustomSkinLoader, остальные его настройки не трогаем
+    path = game_dir / "CustomSkinLoader" / "CustomSkinLoader.json"
+    config = load_json(path, {})
+    ours = {"name": APP_ID, "type": "CustomSkinAPI", "root": SKINS_ROOT}
+    loadlist = config.get("loadlist") or []
+    if loadlist and loadlist[0] == ours:
+        return
+    # Прежняя запись нашего облака тоже уходит: скины теперь только на GitHub
+    config["loadlist"] = [ours] + [p for p in loadlist if p.get("name") not in (APP_ID, OLD_APP_ID)]
+    save_json(path, config)
+
+
 def tlauncher_exe():
     # Установщик TLauncher кладёт TLauncher.exe в папку игры; None — TLauncher не установлен
     for folder in dict.fromkeys([minecraft_dir(), APPDATA / ".minecraft"]):
@@ -260,6 +279,24 @@ def latest_launcher():
     except (requests.RequestException, ValueError):
         traceback.print_exc()
     return None
+
+
+def release_notes():
+    """Релизы лаунчера с GitHub, новые сверху: [{version, date, notes}]. Без сети — из кэша."""
+    try:
+        r = web.get(GITHUB_RELEASES, timeout=8, headers={"Accept": "application/vnd.github+json"})
+        r.raise_for_status()
+        releases = [{"version": (rel.get("name") or rel["tag_name"]).removeprefix("MineForFriends ").strip(),
+                     "date": (rel.get("published_at") or "")[:10], "notes": rel.get("body") or ""}
+                    for rel in r.json() if not rel.get("draft")]
+        save_json(RELEASES_CACHE, releases)
+        return releases
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        traceback.print_exc()
+    releases = load_json(RELEASES_CACHE, None)
+    if releases is None:
+        raise RuntimeError("Не удалось загрузить список обновлений с GitHub. Проверь интернет.")
+    return releases
 
 
 def self_update(status) -> bool:
@@ -388,17 +425,6 @@ class Updater:
         state["version_key"] = key
         save_json(state_file, state)
 
-    def setup_skin_loader(self, game_dir: Path) -> None:
-        # Наше облако первым в списке CustomSkinLoader, остальные его настройки не трогаем
-        path = game_dir / "CustomSkinLoader" / "CustomSkinLoader.json"
-        config = load_json(path, {})
-        ours = {"name": APP_ID, "type": "CustomSkinAPI", "root": f"{CLOUD_URL}/skins/"}
-        loadlist = config.get("loadlist") or []
-        if loadlist and loadlist[0] == ours:
-            return
-        config["loadlist"] = [ours] + [p for p in loadlist if p.get("name") not in (APP_ID, OLD_APP_ID)]
-        save_json(path, config)
-
     def upload_skin(self, nick: str, png: Path, slim: bool) -> str:
         if not re.fullmatch(r"[A-Za-z0-9_]{3,16}", nick):
             raise RuntimeError("Ник должен быть из 3–16 латинских букв, цифр или _ — как в TLauncher.")
@@ -415,9 +441,9 @@ class Updater:
         headers = {"X-Nick": nick, "X-Token": token, "X-Model": "slim" if slim else "default",
                    "Content-Type": "image/png"}
         try:
-            r = cloud.post(f"{CLOUD_URL}/skins/upload", data=data, headers=headers, timeout=15)
+            r = web.post(SKINS_UPLOAD, data=data, headers=headers, timeout=30)
         except requests.RequestException as e:
-            raise RuntimeError("Нет связи с сервером. Проверь Radmin VPN.\n\n" + str(e)) from None
+            raise RuntimeError("Нет связи с сервером скинов. Проверь интернет.\n\n" + str(e)) from None
         try:
             message = r.json()["message"]
         except (ValueError, KeyError):
@@ -426,7 +452,7 @@ class Updater:
             raise RuntimeError(message)
         state["skin_nick"] = nick
         save_json(self.state_file, state)
-        return f"{message} для {nick}. Другие увидят его после перезахода на сервер."
+        return f"{message} для {nick}. В игре он появится через несколько минут, после перезахода."
 
     def download(self, url_path: str, dest: Path, expected_sha1: str) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -554,7 +580,7 @@ class Updater:
             pack = normalize_pack(entry, self.fetch_json(entry["manifest"]))
             game_dir = self.mc_dir / pack["game_dir"]
             self.install_version(pack, game_dir)
-            self.setup_skin_loader(game_dir)
+            setup_skin_loader(game_dir)
             self.sync_pack(pack, game_dir)
             if pack["enable"]:
                 self.enable_packs(game_dir, pack["enable"])
@@ -642,8 +668,14 @@ class Api:
 
     def init(self) -> dict:
         state = load_json(self._mc_dir / DEFAULT_PACK["game_dir"] / "launcher_state.json", {})
+        settings = load_json(SETTINGS_FILE, {})
+        # Лаунчер обновился: один раз покажем список обновлений (на новой установке настройки пустые)
+        updated = bool(settings) and settings.get("seen_version") != APP_VERSION
+        if settings.get("seen_version") != APP_VERSION:
+            settings["seen_version"] = APP_VERSION
+            save_json(SETTINGS_FILE, settings)
         return {"nick": state.get("skin_nick") or tlauncher_nick(self._mc_dir), "skin": skin_b64(),
-                "skin_model": load_json(SETTINGS_FILE, {}).get("skin_model", "default"),
+                "skin_model": settings.get("skin_model", "default"), "updated": updated,
                 "loaders": [[l, custom_packs.LOADER_NAMES[l]] for l in custom_packs.LOADERS],
                 "version": APP_VERSION, "build": build_id(), "cloud_url": CLOUD_URL, "mc_dir": str(self._mc_dir),
                 "settings_dir": str(SETTINGS_FILE.parent), "repo": REPO_URL,
@@ -690,6 +722,9 @@ class Api:
 
     def open_url(self, url: str) -> None:
         webbrowser.open(url)
+
+    def releases(self) -> list:
+        return release_notes()
 
     def open_folder(self, path: str) -> None:
         if Path(path).exists():
@@ -764,6 +799,8 @@ class Api:
     def install_custom(self, name: str, mc: str, loader: str, loader_version) -> dict:
         chosen = {**self._plan, "name": name, "minecraft": mc, "loader": loader, "loader_version": loader_version}
         res = custom_packs.install(chosen, self._mc_dir, status=self._status("custom"), progress=self._progress("custom"))
+        if loader != "vanilla":
+            setup_skin_loader(Path(res["game_dir"]))
         profiles = [p for p in custom_profiles() if p["version_id"] != res["version_id"]] + [
             {k: res[k] for k in ("name", "version_id", "game_dir", "minecraft", "loader", "loader_version")}]
         save_custom_profiles(profiles)
@@ -895,19 +932,20 @@ class Api:
         return {"message": message, "skin": skin_b64()}
 
     def server_skin(self, nick: str):
-        """Скин ника в облаке — так игрока видят другие.
+        """Скин ника на GitHub — так игрока видят другие.
 
-        {"found": True, "skin", "model"}, {"found": False} — скина нет, None — облако недоступно.
+        {"found": True, "skin", "model"}, {"found": False} — скина нет, None — GitHub недоступен.
         """
         if not NICK_RE.match(nick or ""):
             return {"found": False}
         try:
-            r = cloud.get(f"{CLOUD_URL}/skins/{nick}.json", timeout=5)
+            # Метка времени в запросе — чтобы не получить копию из кэша GitHub
+            r = web.get(f"{SKINS_ROOT}{nick}.json", params={"t": int(time.time())}, timeout=8)
             if r.status_code == 404:
                 return {"found": False}
             r.raise_for_status()
             model, texture = next(iter(r.json()["skins"].items()))
-            png = cloud.get(f"{CLOUD_URL}/skins/textures/{texture}", timeout=8)
+            png = web.get(f"{SKINS_ROOT}textures/{texture}", timeout=8)
             png.raise_for_status()
         except (requests.RequestException, ValueError, KeyError, StopIteration):
             return None
