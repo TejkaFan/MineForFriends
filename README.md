@@ -40,11 +40,13 @@ python -m venv .venv
 ## Сборка MineForFriends.exe
 
 ```
-.venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed --name MineForFriends --icon "%CD%\icon.ico" --add-data "%CD%\icon.ico;." --add-data "%CD%\ui;ui" --exclude-module minecraft_launcher_lib --exclude-module tkinter --distpath dist --workpath build --specpath build launcher.py
+.venv\Scripts\python.exe build.py
 copy dist\MineForFriends.exe ..\launcher-cloud\MineForFriends.exe
 .venv\Scripts\python.exe update_manifest.py
 gh release create v<версия> dist\MineForFriends.exe --title "MineForFriends <версия>" --latest
 ```
+
+`build.py` вписывает в exe сведения о файле (TEJKA, название, версия) и собирает его со своим загрузчиком из `bootloader\runw.exe` — так меньше ложных тревог антивирусов; как пересобрать загрузчик, написано в начале `build.py`.
 
 Версию (`APP_VERSION` в `launcher.py`) поднимай перед каждой сборкой. Лаунчер берёт обновления из последнего релиза на GitHub (сверяет SHA-256 файла), а если GitHub недоступен — из облака; старые версии до 0.5.1 знают только облако, поэтому выкладывай в оба места.
 
