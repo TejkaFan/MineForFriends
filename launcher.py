@@ -21,6 +21,7 @@ import threading
 import time
 import traceback
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -28,12 +29,14 @@ import webview
 
 import custom_packs
 from cloud_server import MAX_SKIN, NICK_RE, png_size, valid_skin_size
+import crashes
 import reports
+import server_admin
 import server_host
 import share
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.8.1"
+APP_VERSION = "0.9"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -51,6 +54,7 @@ SETTINGS_FILE = APPDATA / APP_ID / "settings.json"
 OLD_SETTINGS_FILE = APPDATA / OLD_APP_ID / "settings.json"
 # Копия последнего загруженного скина — для аватарки в шапке
 SKIN_FILE = SETTINGS_FILE.parent / "skin.png"
+CAPE_FILE = SETTINGS_FILE.parent / "cape.png"
 MOJANG_MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 
 # Основная сборка; старый манифест облака не содержит этих полей
@@ -61,6 +65,9 @@ DEFAULT_PACK = {
 }
 # Как часто обновлять индикатор серверов, мс
 STATUS_REFRESH = 30_000
+RADMIN_SITE = "https://www.radmin-vpn.com/ru/"
+# Сколько файлов сборки качать одновременно
+DOWNLOAD_THREADS = 6
 # Описание свежего MineForFriends.exe в облаке ({"sha1", "size"}), пишет update_manifest.py
 LAUNCHER_INFO = "launcher.json"
 # Последний релиз на GitHub: основной источник обновлений лаунчера, работает и без Radmin
@@ -71,6 +78,7 @@ RELEASES_CACHE = SETTINGS_FILE.parent / "releases.json"
 # Скины: читает их CustomSkinLoader прямо с GitHub, а загружает Cloudflare Worker (skins-worker/)
 SKINS_ROOT = "https://raw.githubusercontent.com/TejkaFan/MineForFriends-skins/main/skins/"
 SKINS_UPLOAD = "https://mineforfriends-skins.inkiandmelon.workers.dev/upload"
+SKINS_CAPE = "https://mineforfriends-skins.inkiandmelon.workers.dev/cape"
 # Внутри exe ресурсы лежат во временной папке PyInstaller
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 
@@ -429,22 +437,27 @@ class Updater:
         save_json(state_file, state)
 
     def upload_skin(self, nick: str, png: Path, slim: bool) -> str:
-        if not re.fullmatch(r"[A-Za-z0-9_]{3,16}", nick):
-            raise RuntimeError("Ник должен быть из 3–16 латинских букв, цифр или _ — как в TLauncher.")
         data = png.read_bytes()
         if not data.startswith(b"\x89PNG\r\n\x1a\n"):
             raise RuntimeError("Скин должен быть картинкой PNG.")
+        message = self.upload_texture(nick, data, "skin", slim)
+        return f"{message} для {nick}. В игре он появится через несколько минут, после перезахода."
+
+    def upload_texture(self, nick: str, data: bytes, kind: str, slim: bool = False) -> str:
+        # kind: skin или cape; плащ с пустыми data — убрать плащ
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,16}", nick):
+            raise RuntimeError("Ник должен быть из 3–16 латинских букв, цифр или _ — как в TLauncher.")
         # Токен ника: создаётся при первой загрузке и хранится только у этого игрока
         state = load_json(self.state_file, {})
         tokens = state.setdefault("skin_tokens", {})
         token = tokens.setdefault(nick.lower(), secrets.token_urlsafe(24))
         save_json(self.state_file, state)
 
-        self.status("Загружаю скин…")
+        self.status("Загружаю скин…" if kind == "skin" else "Загружаю плащ…")
         headers = {"X-Nick": nick, "X-Token": token, "X-Model": "slim" if slim else "default",
                    "Content-Type": "image/png"}
         try:
-            r = web.post(SKINS_UPLOAD, data=data, headers=headers, timeout=30)
+            r = web.post(SKINS_UPLOAD if kind == "skin" else SKINS_CAPE, data=data, headers=headers, timeout=30)
         except requests.RequestException as e:
             raise RuntimeError("Нет связи с сервером скинов. Проверь интернет.\n\n" + str(e)) from None
         try:
@@ -455,7 +468,7 @@ class Updater:
             raise RuntimeError(message)
         state["skin_nick"] = nick
         save_json(self.state_file, state)
-        return f"{message} для {nick}. В игре он появится через несколько минут, после перезахода."
+        return message
 
     def download(self, url: str, dest: Path, expected_sha1: str) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -513,19 +526,31 @@ class Updater:
 
         total = sum(f["size"] for f in todo) or 1
         done = 0
-        for i, f in enumerate(todo, 1):
-            self.status(f"{name}: скачиваю {Path(f['path']).name} ({i}/{len(todo)}, {done / 2**20:.0f} из {total / 2**20:.0f} МБ)")
-            # Сборки друзей качаются с ПК хоста, остальные — из облака
-            root = pack.get("root") or CLOUD_URL
-            self.download(f"{root}/{requests.utils.quote(pack['base'] + f['path'])}", inside(game_dir, f["path"]), f["sha1"])
-            if f["path"] not in once:
-                recorded[f["path"]] = f["sha1"]
-            done += f["size"]
-            self.progress(done / total)
-            if i % 100 == 0:
-                # Чтобы после обрыва связи продолжить с того же места
+        # Сборки друзей качаются с ПК хоста, остальные — из облака
+        root = pack.get("root") or CLOUD_URL
+        # Пути считаем до загрузки: resolve() не должен видеть папки, которые как раз создают потоки
+        targets = [(f, inside(game_dir, f["path"])) for f in todo]
+        with ThreadPoolExecutor(DOWNLOAD_THREADS) as pool:
+            jobs = {pool.submit(self.download, f"{root}/{requests.utils.quote(pack['base'] + f['path'])}",
+                                dest, f["sha1"]): f for f, dest in targets}
+            try:
+                for i, job in enumerate(as_completed(jobs), 1):
+                    job.result()
+                    f = jobs[job]
+                    if f["path"] not in once:
+                        recorded[f["path"]] = f["sha1"]
+                    done += f["size"]
+                    self.status(f"{name}: скачиваю файлы ({i}/{len(todo)}, {done / 2**20:.0f} из {total / 2**20:.0f} МБ)")
+                    self.progress(done / total)
+                    if i % 100 == 0:
+                        # Чтобы после обрыва связи продолжить с того же места
+                        state["files"] = recorded
+                        save_json(state_file, state)
+            except BaseException:
+                pool.shutdown(cancel_futures=True)
                 state["files"] = recorded
                 save_json(state_file, state)
+                raise
 
         state["files"] = recorded
         state.pop("managed_mods", None)
@@ -587,6 +612,7 @@ class Updater:
         version_id = custom_packs.safe_name(f"{name} ({host})")
         game_dir = self.mc_dir / "friends" / custom_packs.slug(f"{host}-{entry['id']}")
         game_dir.mkdir(parents=True, exist_ok=True)
+        (game_dir / ".mineserc_pack").write_text(version_id, "utf-8")  # по нему разбор вылетов узнаёт сборку
         ensure_server(game_dir / "servers.dat", name, f"{entry['ip']}:{entry['port']}")
 
         # Версия в TLauncher: пересобираем, только если хост сменил Minecraft или загрузчик
@@ -689,6 +715,18 @@ def shared_servers() -> list:
     return result
 
 
+def radmin_exe():
+    for base in (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles")):
+        if base and (Path(base) / "Radmin VPN" / "RvRvpnGui.exe").exists():
+            return Path(base) / "Radmin VPN" / "RvRvpnGui.exe"
+    return None
+
+
+def radmin_state() -> dict:
+    # on — у компьютера есть адрес Radmin 26.x.x.x, то есть Radmin VPN подключён
+    return {"installed": radmin_exe() is not None, "on": server_host.radmin_ip() is not None}
+
+
 def loader_title(s: dict) -> str:
     return f"{custom_packs.LOADER_NAMES.get(s.get('loader'), s.get('loader', ''))} {s.get('minecraft', '')}".strip()
 
@@ -740,11 +778,16 @@ def build_id() -> str:
     return sha1(Path(sys.executable))[:10] if getattr(sys, "frozen", False) else "dev"
 
 
-def skin_b64():
+def skin_b64(path: Path = SKIN_FILE):
     try:
-        return base64.b64encode(SKIN_FILE.read_bytes()).decode() if SKIN_FILE.exists() else None
+        return base64.b64encode(path.read_bytes()).decode() if path.exists() else None
     except OSError:
         return None
+
+
+def valid_cape_size(w: int, h: int) -> bool:
+    # 64x32 и HD кратно 64, плюс самый старый формат 22x17 — как в skins-worker
+    return (w % 64 == 0 and 64 <= w <= 1024 and h == w // 2) or (w, h) == (22, 17)
 
 
 class Api:
@@ -761,6 +804,8 @@ class Api:
         self._booted = False
         self._waiting_tl = False
         self._skin_path = None  # выбранный, но ещё не загруженный скин
+        self._cape = None  # то же для плаща: путь к PNG или "" — убрать плащ
+        self._crash = None  # разбор последнего вылета Minecraft
 
     def _emit(self, event: str, data=None) -> None:
         try:
@@ -799,11 +844,39 @@ class Api:
             settings["seen_version"] = APP_VERSION
             save_json(SETTINGS_FILE, settings)
         return {"nick": state.get("skin_nick") or tlauncher_nick(self._mc_dir), "skin": skin_b64(),
+                "cape": skin_b64(CAPE_FILE),
                 "skin_model": settings.get("skin_model", "default"), "updated": updated,
                 "loaders": [[l, custom_packs.LOADER_NAMES[l]] for l in custom_packs.LOADERS],
                 "version": APP_VERSION, "build": build_id(), "cloud_url": CLOUD_URL, "mc_dir": str(self._mc_dir),
                 "settings_dir": str(SETTINGS_FILE.parent), "repo": REPO_URL,
                 "eula_url": server_host.EULA_URL, "skins_site": SKINS_SITE, "tlauncher": tlauncher_exe() is not None}
+
+    def last_crash(self):
+        """Свежий вылет Minecraft, которого игрок ещё не видел: разбор для окна или None."""
+        settings = load_json(SETTINGS_FILE, {})
+        seen = settings.get("crash_seen")
+        found = crashes.candidates(self._mc_dir, seen or time.time())
+        settings["crash_seen"] = max([time.time()] + [p.stat().st_mtime for p in found])
+        save_json(SETTINGS_FILE, settings)
+        if seen is None or not found:
+            return None  # при первом запуске старые вылеты не показываем
+        names = {str(self._mc_dir / DEFAULT_PACK["game_dir"]): DEFAULT_PACK["name"]}
+        names.update({p["game_dir"]: p["name"] for p in custom_profiles()})
+        self._crash = crashes.analyze(found[0], self._mc_dir, names)
+        return {k: v for k, v in self._crash.items() if k != "text"}
+
+    def send_crash(self) -> str:
+        c = self._crash
+        if not c:
+            raise RuntimeError("Нет вылета, о котором можно отправить отчёт.")
+        text = (f"Сборка: {c['pack']}\nКогда: {c['time']}\nЧто делала игра: {c['where'] or '?'}\n"
+                f"Разбор лаунчера: {' '.join(c['hints'])}\nФайл: {c['file']}\n\n{c['text']}")
+        return reports.send("game", f"{c['pack']}: {c['title']}", text,
+                            reports.signature("game", c["pack"], c["title"], *c["mods"]), auto=False)
+
+    def open_crash(self) -> None:
+        if self._crash:
+            os.startfile(self._crash["file"])
 
     def boot(self) -> None:
         # Интерфейс готов: проверяем версию лаунчера и запускаем индикатор серверов
@@ -888,7 +961,14 @@ class Api:
             t.join()
         for c in cards:
             c["status"] = results.get(c["id"])
-        return {"cloud": cloud_ok, "packs": cards, "selected": selected_packs()}
+        return {"cloud": cloud_ok, "packs": cards, "selected": selected_packs(), "radmin": radmin_state()}
+
+    def open_radmin(self) -> None:
+        exe = radmin_exe()
+        if exe:
+            subprocess.Popen([str(exe)], cwd=str(exe.parent))
+        else:
+            webbrowser.open(RADMIN_SITE)
 
     def refresh_servers(self) -> None:
         self._emit("servers", self._servers())
@@ -989,10 +1069,16 @@ class Api:
         servers = []
         for s in hosted_servers():
             port = server_host.read_properties(Path(s["path"]) / "server.properties").get("server-port", "?")
+            status = server_status(f"127.0.0.1:{port}", 1) if str(port).isdigit() else None
             servers.append({"name": s["name"], "path": s["path"], "minecraft": s.get("minecraft", ""),
                             "loader_name": custom_packs.LOADER_NAMES.get(s.get("loader"), s.get("loader", "")),
-                            "address": f"{ip}:{port}"})
+                            "address": f"{ip}:{port}", "online": status is not None,
+                            "players": f"{status['online']}/{status['max']}" if status else ""})
         return servers
+
+    def _online(self, path: str) -> bool:
+        port = server_host.read_properties(Path(path) / "server.properties").get("server-port", "25565")
+        return server_status(f"127.0.0.1:{port}", 2) is not None
 
     def host_server(self, pack_name: str):
         profile = next((p for p in custom_profiles() if p["name"] == pack_name), None)
@@ -1052,10 +1138,49 @@ class Api:
 
     def start_server(self, path: str) -> str:
         record = self._server(path)
+        if self._online(path):
+            raise RuntimeError("Сервер уже запущен.")
+        server_admin.ensure_rcon(Path(path))
+        saved = server_admin.backup(Path(path), False, self._status("host"))
         server_host.start(record)
         start_sharing()
-        return (f"Сервер «{record['name']}» запускается в отдельном окне. Друзья в Radmin увидят его в лаунчере "
+        return ((f"Бэкап мира: {saved.name}. " if saved else "")
+                + f"Сервер «{record['name']}» запускается в отдельном окне. Друзья в Radmin увидят его в лаунчере "
                 f"на вкладке «Наши серверы». Если Windows спросит про доступ MineForFriends к сети — разреши.")
+
+    def stop_server(self, path: str) -> str:
+        self._server(path)
+        server_admin.rcon(Path(path), "stop")
+        return "Сервер сохраняет мир и выключается."
+
+    def restart_server(self, path: str) -> str:
+        self.stop_server(path)
+        status = self._status("host")
+        status("Жду, пока сервер выключится…")
+        for _ in range(90):
+            time.sleep(2)
+            if not self._online(path):
+                break
+        else:
+            raise RuntimeError("Сервер не выключился за 3 минуты. Проверь окно его консоли.")
+        time.sleep(3)  # окно консоли ещё дописывает мир и закрывается
+        return self.start_server(path)
+
+    def server_players(self, path: str) -> dict:
+        self._server(path)
+        online = self._online(path)
+        return {**server_admin.players(Path(path), online), "running": online}
+
+    def server_player_action(self, path: str, action: str, name: str = "") -> None:
+        self._server(path)
+        server_admin.player_action(Path(path), self._online(path), action, name.strip())
+
+    def backup_server(self, path: str) -> str:
+        self._server(path)
+        saved = server_admin.backup(Path(path), self._online(path), self._status("host"))
+        if not saved:
+            return "Мира ещё нет: он появится после первого запуска сервера."
+        return f"Бэкап готов: {saved}"
 
     def forget_server(self, path: str) -> None:
         save_hosted_servers([s for s in hosted_servers() if s["path"] != path])
@@ -1076,38 +1201,74 @@ class Api:
         self._skin_path = Path(png)
         return {"skin": base64.b64encode(data).decode(), "name": self._skin_path.name}
 
+    def pick_cape(self):
+        png = self._pick(webview.FileDialog.OPEN, ("Плащ PNG (*.png)",))
+        if not png:
+            return None
+        data = Path(png).read_bytes()
+        size = png_size(data)
+        if not size or not valid_cape_size(*size):
+            raise RuntimeError("Это не похоже на плащ: нужен PNG 64×32 (или HD со сторонами, кратными 64×32).")
+        if len(data) > MAX_SKIN:
+            raise RuntimeError("Файл плаща больше 1 МБ.")
+        self._cape = png
+        return {"cape": base64.b64encode(data).decode(), "name": Path(png).name}
+
+    def remove_cape(self):
+        # Плащ уберётся с сервера по кнопке «Загрузить на сервер», вместе со скином
+        self._cape = ""
+
     def upload_skin(self, nick: str, slim: bool) -> dict:
-        if not self._skin_path:
-            raise RuntimeError("Сначала выбери PNG со скином.")
-        message = Updater(self._status("skin"), lambda v: None).upload_skin(nick, self._skin_path, slim)
-        # Копия для аватарки в шапке и предпросмотра без облака
+        if not self._skin_path and self._cape is None:
+            raise RuntimeError("Сначала выбери PNG со скином или плащом.")
+        updater = Updater(self._status("skin"), lambda v: None)
         SKIN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(self._skin_path, SKIN_FILE)
-        settings = load_json(SETTINGS_FILE, {})
-        settings["skin_model"] = "slim" if slim else "default"
-        save_json(SETTINGS_FILE, settings)
-        self._skin_path = None
-        return {"message": message, "skin": skin_b64()}
+        done = []
+        if self._skin_path:
+            done.append(updater.upload_skin(nick, self._skin_path, slim))
+            # Копия для аватарки в шапке и предпросмотра без облака
+            shutil.copyfile(self._skin_path, SKIN_FILE)
+            settings = load_json(SETTINGS_FILE, {})
+            settings["skin_model"] = "slim" if slim else "default"
+            save_json(SETTINGS_FILE, settings)
+            self._skin_path = None
+        if self._cape is not None:
+            data = Path(self._cape).read_bytes() if self._cape else b""
+            message = updater.upload_texture(nick, data, "cape")
+            if data:
+                CAPE_FILE.write_bytes(data)
+            else:
+                CAPE_FILE.unlink(missing_ok=True)
+            self._cape = None
+            done.append(message if done else f"{message} для {nick}. В игре это будет видно через несколько минут, после перезахода.")
+        return {"message": " ".join(done), "skin": skin_b64(), "cape": skin_b64(CAPE_FILE)}
 
     def server_skin(self, nick: str):
         """Скин ника на GitHub — так игрока видят другие.
 
-        {"found": True, "skin", "model"}, {"found": False} — скина нет, None — GitHub недоступен.
+        {"found": True, "skin", "model", "cape"}, {"found": False} — скина нет, None — GitHub недоступен.
+        skin и cape — PNG в base64 или None (у ника только плащ / только скин).
         """
         if not NICK_RE.match(nick or ""):
             return {"found": False}
+
+        def texture(name):
+            png = web.get(f"{SKINS_ROOT}textures/{name}", timeout=8)
+            png.raise_for_status()
+            return base64.b64encode(png.content).decode()
+
         try:
             # Метка времени в запросе — чтобы не получить копию из кэша GitHub
             r = web.get(f"{SKINS_ROOT}{nick}.json", params={"t": int(time.time())}, timeout=8)
             if r.status_code == 404:
                 return {"found": False}
             r.raise_for_status()
-            model, texture = next(iter(r.json()["skins"].items()))
-            png = web.get(f"{SKINS_ROOT}textures/{texture}", timeout=8)
-            png.raise_for_status()
-        except (requests.RequestException, ValueError, KeyError, StopIteration):
+            profile = r.json()
+            model, skin = next(iter(profile.get("skins", {}).items()), ("default", None))
+            return {"found": True, "skin": skin and texture(skin), "model": model,
+                    "cape": profile.get("cape") and texture(profile["cape"])}
+        except (requests.RequestException, ValueError, AttributeError):
             return None
-        return {"found": True, "skin": base64.b64encode(png.content).decode(), "model": model}
 
     # ---- Отчёты об ошибках
 

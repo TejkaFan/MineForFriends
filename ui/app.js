@@ -84,6 +84,8 @@ async function sendReport(text) {
 // Ошибки самого интерфейса. Ошибки из Python (RuntimeError) уже показаны игроку или отправлены
 function reportJs(error, fallback) {
   if (!window.pywebview?.api?.report_js || error?.name === "RuntimeError") return;
+  // Событие вместо ошибки (не загрузилась картинка и т. п.) — «[object Event]» в отчёте ничего не скажет
+  if (error instanceof Event) error = {message: `событие ${error.type} от ${error.target?.tagName || "?"}`};
   api().report_js(String(error?.message || fallback || error), String(error?.stack || "")).catch(() => {});
 }
 window.addEventListener("error", e => reportJs(e.error, `${e.message} (${e.filename}:${e.lineno})`));
@@ -150,10 +152,14 @@ function setNick(nick) {
 
 function renderServers(d) {
   Object.assign(state, {packs: d.packs, cloud: d.cloud, selected: d.selected});
+  state.radmin = d.radmin ?? state.radmin;  // toggleCard перерисовывает без свежей проверки
+  showRadmin(state.radmin);
   const line = $("#cloud-line");
   if (!d.cloud && !d.packs.length) {
     line.className = "line err";
-    line.textContent = "Облако недоступно — сборки сейчас не загрузить. Проверь Radmin VPN или подожди, пока хост включит сервер.";
+    line.textContent = state.radmin?.on
+      ? "Наш сервер не отвечает. Проверь, что в Radmin VPN ты зашёл в нашу сеть, или подожди, пока хост включит облако."
+      : "Облако недоступно — сборки сейчас не загрузить. Проверь Radmin VPN или подожди, пока хост включит сервер.";
     $("#cards").innerHTML = "";
     updatePlay();
     return;
@@ -214,6 +220,18 @@ async function play() {
     updatePlay();
     showError(errText(e));
   }
+}
+
+// Без Radmin VPN не видно ни наших серверов, ни серверов друзей
+function showRadmin(r) {
+  const off = r && !r.on;
+  $("#radmin-notice").classList.toggle("hidden", !off);
+  if (!off) return;
+  $("#radmin-title").textContent = r.installed ? "Radmin VPN выключен" : "Radmin VPN не установлен";
+  $("#radmin-text").textContent = r.installed
+    ? "Запусти Radmin VPN и зайди в нашу сеть — без него не видно серверов и не скачать сборки."
+    : "Через Radmin VPN мы играем вместе: поставь его и зайди в нашу сеть (название и пароль спроси у хоста).";
+  $("#radmin-btn").innerHTML = `${icon(r.installed ? "player-play" : "cloud-download")}${r.installed ? "Запустить Radmin" : "Скачать Radmin VPN"}`;
 }
 
 // Серверы друзей находятся сами через Radmin; адрес вручную — если поиск по сети не дошёл
@@ -392,9 +410,15 @@ async function loadServerTab() {
   sel.value = profiles.some(p => p.name === keep) ? keep : (profiles.at(-1)?.name || "");
   $("#hosted").innerHTML = servers.length ? servers.map((s, i) => `
     <div class="item"><div class="grow"><div class="name">${esc(s.name)}</div>
+      <div class="meta"><span class="state${s.online ? " online" : ""}">${s.online ? `● онлайн · ${esc(s.players)}` : "○ выключен"}</span></div>
       <div class="meta">${esc(s.address)} · ${esc(s.minecraft)} ${esc(s.loader_name)}</div></div>
       <div class="tools">
-        <button class="iconbtn go" data-act="start" data-i="${i}" title="Запустить">${icon("player-play")}</button>
+        ${s.online
+          ? `<button class="iconbtn del" data-act="stop" data-i="${i}" title="Остановить">${icon("player-stop")}</button>
+             <button class="iconbtn" data-act="restart" data-i="${i}" title="Перезапустить">${icon("refresh")}</button>`
+          : `<button class="iconbtn go" data-act="start" data-i="${i}" title="Запустить (перед запуском — бэкап мира)">${icon("player-play")}</button>`}
+        <button class="iconbtn" data-act="players" data-i="${i}" title="Игроки, белый список, операторы">${icon("users")}</button>
+        <button class="iconbtn" data-act="backup" data-i="${i}" title="Бэкап мира сейчас">${icon("device-floppy")}</button>
         <button class="iconbtn" data-act="settings" data-i="${i}" title="Настройки">${icon("settings")}</button>
         <button class="iconbtn" data-act="folder" data-i="${i}" title="Папка сервера">${icon("folder")}</button>
         <button class="iconbtn del" data-act="forget" data-i="${i}" title="Убрать из списка">${icon("trash")}</button>
@@ -457,9 +481,65 @@ async function serverSettings(path) {
   loadServerTab();
 }
 
+// Игроки онлайн, белый список и операторы. Пока сервер запущен — команды по RCON, иначе правка файлов
+async function serverPlayers(s) {
+  const render = async () => {
+    const body = $("#modal-body");
+    let d;
+    try {
+      d = await api().server_players(s.path);
+    } catch (e) {
+      body.innerHTML = `<div class="hint">${esc(errText(e))}</div>`;
+      return;
+    }
+    const chips = (names, act) => names.length
+      ? names.map(n => `<span class="chip-name">${esc(n)}<button data-act="${act}" data-name="${esc(n)}" title="Убрать">×</button></span>`).join("")
+      : `<span class="muted">пусто</span>`;
+    body.innerHTML = `
+      <div class="pl-sec"><h4>Сейчас на сервере</h4>
+        ${!d.running ? `<span class="muted">сервер выключен</span>` : d.online.length
+          ? d.online.map(n => `<span class="chip-name">${esc(n)}<button data-act="kick" data-name="${esc(n)}" title="Кикнуть">×</button></span>`).join("")
+          : `<span class="muted">никого</span>`}</div>
+      <div class="pl-sec"><h4>Белый список</h4>
+        <label class="check"><input type="checkbox" id="wl-on" ${d.whitelist_on ? "checked" : ""}><span>Пускать только игроков из списка</span></label>
+        <div class="chips">${chips(d.whitelist, "whitelist_remove")}</div>
+        <div class="row2"><input id="wl-name" maxlength="16" placeholder="Ник"><button class="btn" data-act="whitelist_add">Добавить</button></div></div>
+      <div class="pl-sec"><h4>Операторы (админы)</h4>
+        <div class="chips">${chips(d.ops, "deop")}</div>
+        <div class="row2"><input id="op-name" maxlength="16" placeholder="Ник"><button class="btn" data-act="op">Сделать оператором</button></div></div>
+      <div class="hint" id="pl-err">${d.running ? "" : "Сервер выключен: изменения применятся при следующем запуске."}</div>`;
+    $("#wl-on", body).onchange = e => act(e.target.checked ? "whitelist_on" : "whitelist_off");
+  };
+  const act = async (action, name = "") => {
+    try {
+      await api().server_player_action(s.path, action, name);
+      await render();
+    } catch (e) {
+      $("#pl-err").textContent = errText(e);
+    }
+  };
+  const done = dialog({title: `Игроки — ${s.name}`, html: '<div class="muted">Загружаю…</div>', wide: true,
+                       buttons: [{label: "Закрыть", value: null, primary: true}]});
+  $("#modal-body").onclick = e => {
+    const b = e.target.closest("button[data-act]");
+    if (!b) return;
+    const input = b.dataset.act === "whitelist_add" ? $("#wl-name") : b.dataset.act === "op" ? $("#op-name") : null;
+    act(b.dataset.act, input ? input.value : b.dataset.name);
+  };
+  await render();
+  await done;
+}
+
 async function serverAction(act, s) {
   try {
-    if (act === "start") setStatus("host", await api().start_server(s.path));
+    if (["start", "stop", "restart", "backup"].includes(act)) {
+      setStatus("host", act === "backup" ? "Делаю бэкап мира…" : act === "stop" ? "Останавливаю сервер…" : "Готовлю запуск…");
+      const call = {start: "start_server", stop: "stop_server", restart: "restart_server", backup: "backup_server"}[act];
+      setStatus("host", await api()[call](s.path));
+      // Сервер запускается и выключается не мгновенно — обновим индикатор чуть позже
+      setTimeout(loadServerTab, act === "stop" ? 8000 : 25000);
+    }
+    if (act === "players") await serverPlayers(s);
     if (act === "settings") await serverSettings(s.path);
     if (act === "folder") await api().open_folder(s.path);
     if (act === "forget") {
@@ -477,7 +557,8 @@ async function serverAction(act, s) {
 // ---------- Скин ----------
 
 // source: "server" — скин из облака, "local" — последняя загруженная копия, "picked" — выбран, но не загружен
-const skin = {viewer: null, b64: null, model: "default", source: null, animate: true};
+// cape — плащ в base64 или null; capeChanged — плащ выбран или убран, но ещё не загружен
+const skin = {viewer: null, b64: null, model: "default", source: null, animate: true, cape: null, capeChanged: false};
 
 function skinViewer() {
   if (!skin.viewer && window.skinview3d) {
@@ -502,8 +583,14 @@ function renderSkin() {
   const in3d = Boolean(v && skin.b64);
   $("#skin-3d").classList.toggle("hidden", !in3d);
   $("#skin-face").classList.toggle("hidden", in3d);
-  if (in3d) v.loadSkin("data:image/png;base64," + skin.b64, {model: skin.model});
-  else drawFace($("#skin-face"), skin.b64);
+  if (in3d) {
+    // Битая картинка — просто не показываем её, а не роняем предпросмотр
+    Promise.resolve(v.loadSkin("data:image/png;base64," + skin.b64, {model: skin.model}))
+      .catch(() => console.warn("скин не читается"));
+    Promise.resolve(v.loadCape(skin.cape ? "data:image/png;base64," + skin.cape : null))
+      .catch(() => { console.warn("плащ не читается"); v.loadCape(null); });
+  } else drawFace($("#skin-face"), skin.b64);
+  $("#cape-remove").disabled = !skin.cape;
 }
 
 function setSkinTag(text, kind = "") {
@@ -516,8 +603,10 @@ function setModel(model) {
   $(`input[name=model][value=${model}]`).checked = true;
 }
 
-function showServerSkin(nick, b64, model) {
-  Object.assign(skin, {b64, source: "server"});
+function showServerSkin(nick, b64, model, cape) {
+  // У ника может быть только плащ — тогда скин показываем свой последний загруженный
+  b64 = b64 || state.info.skin;
+  Object.assign(skin, {b64, cape, source: "server"});
   setModel(model);
   setSkinTag(`Так ${nick} видят на сервере`, "server");
   drawFace($("#chip-head"), b64);
@@ -525,14 +614,15 @@ function showServerSkin(nick, b64, model) {
 }
 
 async function loadServerSkin() {
-  if (skin.source === "picked") return; // не перебиваем предпросмотр выбранного файла
+  // не перебиваем предпросмотр выбранного файла
+  if (skin.source === "picked" || skin.capeChanged) return;
   const nick = $("#nick").value.trim();
   setSkinTag("Проверяю скин на сервере…");
   const res = await api().server_skin(nick);
-  if (skin.source === "picked") return;
-  if (res && res.found) return showServerSkin(nick, res.skin, res.model);
+  if (skin.source === "picked" || skin.capeChanged) return;
+  if (res && res.found) return showServerSkin(nick, res.skin, res.model, res.cape);
   // Скина на сервере нет или облако недоступно — показываем последнюю загруженную копию
-  Object.assign(skin, {b64: state.info.skin, source: "local"});
+  Object.assign(skin, {b64: state.info.skin, cape: res ? null : state.info.cape, source: "local"});
   setModel(state.info.skin_model);
   setSkinTag(!res ? "Нет связи с сервером скинов — показан последний загруженный скин"
     : `На сервере у ${nick || "этого ника"} стандартный скин`);
@@ -553,6 +643,28 @@ async function chooseSkin() {
   }
 }
 
+function capePicked(cape, tag) {
+  Object.assign(skin, {cape, capeChanged: true});
+  setSkinTag(tag, "preview");
+  $("#skin-status").textContent = "";
+  $("#skin-upload").disabled = false;
+  renderSkin();
+}
+
+async function chooseCape() {
+  try {
+    const res = await api().pick_cape();
+    if (res) capePicked(res.cape, `Предпросмотр плаща: ${res.name} — ещё не загружен`);
+  } catch (e) {
+    showError(errText(e));
+  }
+}
+
+async function removeCape() {
+  await api().remove_cape();
+  capePicked(null, "Без плаща — нажми «Загрузить на сервер», чтобы убрать его");
+}
+
 async function uploadSkin() {
   const nick = $("#nick").value.trim();
   if (!nick) return showInfo("Нужен ник", "Впиши ник, под которым играешь в TLauncher.");
@@ -563,9 +675,11 @@ async function uploadSkin() {
     status.className = "line";
     status.textContent = res.message;
     state.info.skin = res.skin;
+    state.info.cape = res.cape;
     state.info.skin_model = skin.model;
+    skin.capeChanged = false;
     setNick(nick);
-    showServerSkin(nick, res.skin, skin.model);
+    showServerSkin(nick, res.skin, skin.model, res.cape);
   } catch (e) {
     status.className = "line err";
     status.textContent = "Скин не загружен";
@@ -689,6 +803,32 @@ async function changelog(title = "Что нового") {
   }
 }
 
+// ---------- Вылеты Minecraft ----------
+
+async function showCrash(c) {
+  const html = `<div class="kv">
+      <span>Сборка</span><span class="text">${esc(c.pack)}</span>
+      <span>Когда</span><span class="text">${esc(c.time)}</span>
+      ${c.where ? `<span>Что делала игра</span><span class="text">${esc(c.where)}</span>` : ""}
+      <span>Ошибка</span><span class="text">${esc(c.title)}</span>
+    </div>
+    <ul class="hints">${c.hints.map(h => `<li>${esc(h)}</li>`).join("")}</ul>`;
+  const choice = await dialog({title: "Minecraft вылетел", html, buttons: [
+    {label: "Открыть отчёт", value: "open"}, {label: "Отправить автору", value: "send"},
+    {label: "Понятно", value: null, primary: true},
+  ]});
+  if (choice === "open") api().open_crash();
+  if (choice === "send") {
+    let message;
+    try {
+      message = await api().send_crash();
+    } catch (e) {
+      message = errText(e);
+    }
+    showInfo("Отчёт", message);
+  }
+}
+
 // ---------- Старт ----------
 
 // События из Python
@@ -720,6 +860,10 @@ function bind() {
   $("#play-btn").onclick = play;
   $("#tl-install").onclick = installTlauncher;
   $("#friend-add").onclick = friendHosts;
+  $("#radmin-btn").onclick = () => {
+    api().open_radmin();
+    $("#radmin-text").textContent = "Когда Radmin VPN подключится, плашка пропадёт сама (проверка раз в 30 секунд).";
+  };
   $("#pick-dir").onclick = () => pickPack("dir");
   $("#pick-zip").onclick = () => pickPack("zip");
   for (const r of $$("input[name=mc-mode]")) r.onchange = () => { setCustomBusy(false); refreshLoader(); };
@@ -738,6 +882,8 @@ function bind() {
   };
   $("#skin-choose").onclick = chooseSkin;
   $("#skin-upload").onclick = uploadSkin;
+  $("#cape-choose").onclick = chooseCape;
+  $("#cape-remove").onclick = removeCape;
   $("#skin-anim").onclick = toggleSkinAnimation;
   for (const r of $$("input[name=model]")) r.onchange = () => { skin.model = r.value; renderSkin(); };
   $("#nick").onchange = loadServerSkin;
@@ -762,6 +908,7 @@ async function start() {
   loadServerSkin();
   loadProfiles();
   if (info.updated) changelog(`Лаунчер обновлён до ${info.version}`);
+  else api().last_crash().then(c => c && showCrash(c)).catch(() => {});
   api().boot();
 }
 

@@ -23,6 +23,7 @@ REPORT_URL = "https://mineforfriends-skins.inkiandmelon.workers.dev/report"
 LOG_LIMIT = 512 * 1024
 LOG_TAIL = 150
 REPEAT_AFTER = 24 * 60 * 60
+MAX_TEXT = 50_000
 
 config = {"dir": None, "version": "?", "build": "?"}
 
@@ -126,11 +127,16 @@ def send(kind: str, title: str, text: str, sig: str, auto: bool = True) -> str:
     if config["dir"] is None or (auto and sent_recently(sig)):
         return "Отчёт об этой ошибке уже отправлен."
     tail = log_tail()
+    body = scrub(f"{text.strip()}\n\n----- последние строки лога -----\n{tail}")
+    # Worker принимает до 64 КБ: начало (сама ошибка) и конец (свежий лог) важнее середины
+    if len(body) > MAX_TEXT:
+        body = body[:MAX_TEXT // 2] + "\n…\n" + body[-MAX_TEXT // 2:]
     payload = {"kind": kind, "title": scrub(title)[:100], "signature": sig, "version": config["version"],
-               "build": config["build"], "os": platform.platform(),
-               "text": scrub(f"{text.strip()}\n\n----- последние строки лога -----\n{tail}")[-60000:]}
+               "build": config["build"], "os": platform.platform(), "text": body}
     try:
-        r = requests.post(REPORT_URL, json=payload, timeout=15)
+        # ensure_ascii=False: иначе каждая русская буква превращается в \uXXXX и отчёт раздувается в 6 раз
+        r = requests.post(REPORT_URL, data=json.dumps(payload, ensure_ascii=False).encode(),
+                          headers={"Content-Type": "application/json; charset=utf-8"}, timeout=15)
         message = r.json().get("message") or f"Ошибка сервера ({r.status_code})"
         print(f"Отчёт [{sig}]: {r.status_code} {message}")
         return message

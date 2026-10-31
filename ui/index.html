@@ -43,6 +43,14 @@
         </div>
         <button class="btn primary" id="tl-install"><span data-icon="cloud-download"></span>Установить TLauncher</button>
       </div>
+      <div class="notice hidden" id="radmin-notice">
+        <span class="ico" data-icon="alert-triangle"></span>
+        <div class="grow">
+          <div class="ntitle" id="radmin-title"></div>
+          <div class="ntext" id="radmin-text"></div>
+        </div>
+        <button class="btn primary" id="radmin-btn"></button>
+      </div>
       <div class="line-row">
         <div id="cloud-line" class="line muted">Проверяю серверы…</div>
         <button class="link" id="friend-add" title="Если сервер друга не появился сам">Сервер друга по адресу…</button>
@@ -129,7 +137,7 @@
         </div>
         <div class="panel">
           <h2 class="px">Скин на сервере</h2>
-          <p class="muted">Скин привязан к нику и виден в любой сборке из лаунчера — на серверах и в одиночной игре (через мод CustomSkinLoader). Radmin для этого не нужен.</p>
+          <p class="muted">Скин и плащ привязаны к нику и видны в любой сборке из лаунчера — на серверах и в одиночной игре (через мод CustomSkinLoader). Radmin для этого не нужен.</p>
           <label class="field"><span>Ник как в TLauncher</span><input id="nick" maxlength="16"></label>
           <div class="models">
             <label><input type="radio" name="model" value="default" checked><span>Обычная модель</span></label>
@@ -138,6 +146,10 @@
           <div class="row2">
             <button class="btn" id="skin-choose"><span data-icon="photo"></span>Выбрать PNG…</button>
             <button class="btn" id="skin-site"><span data-icon="external-link"></span>Найти скин на сайте</button>
+          </div>
+          <div class="row2">
+            <button class="btn" id="cape-choose"><span data-icon="flag"></span>Выбрать плащ…</button>
+            <button class="btn" id="cape-remove"><span data-icon="x"></span>Убрать плащ</button>
           </div>
           <button class="btn primary wide" id="skin-upload" disabled><span data-icon="upload"></span>Загрузить на сервер</button>
           <div class="line" id="skin-status"></div>

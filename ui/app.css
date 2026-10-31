@@ -227,6 +227,18 @@ input[type=radio], input[type=checkbox] { accent-color: var(--green-2); margin: 
 .kv span:nth-child(odd) { color: var(--muted); }
 .kv span:nth-child(even) { user-select: text; word-break: break-all; }
 .kv span.text { word-break: normal; }
+.pl-sec { margin-bottom: 16px; }
+.pl-sec h4 { margin: 0 0 8px; font-size: 13px; color: var(--white); font-weight: 600; }
+.pl-sec .row2 { margin-top: 8px; }
+.pl-sec .row2 input { flex: 1; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chip-name { display: inline-flex; align-items: center; gap: 4px; background: var(--line); border-radius: 6px;
+  padding: 3px 4px 3px 9px; font-size: 12px; margin: 0 6px 6px 0; }
+.chip-name button { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 4px; }
+.chip-name button:hover { color: var(--red); }
+.item .state.online { color: var(--ok); }
+.hints { margin: 14px 0 0; padding-left: 20px; font-size: 13px; }
+.hints li { margin: 6px 0; }
 .credits { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px; }
 .credits h4 { margin: 0 0 8px; font-size: 9px; color: var(--white); }
 .credits a { cursor: pointer; text-decoration: none; }
