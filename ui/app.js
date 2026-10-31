@@ -182,7 +182,8 @@ function renderServers(d) {
       <div class="desc">${esc([p.description, size].filter(Boolean).join(" · "))}</div>
       ${who}
       <div class="fill"><div style="width:${fill}%"></div></div>
-      <div class="pick"><span class="tick">${icon("check")}</span>${on ? "Ставится и обновляется" : "Не ставится"}</div>
+      <div class="pick"><span class="tick">${icon("check")}</span>${on ? "Ставится и обновляется" : "Не ставится"}
+        <button class="mem" data-mem="${esc(p.id)}" title="Память для игры в этой сборке">${icon("cpu")}${p.memory} ГБ</button></div>
     </div>`;
   }).join("");
   updatePlay();
@@ -382,14 +383,138 @@ async function loadProfiles() {
   $("#profiles").innerHTML = state.profiles.length ? state.profiles.map((p, i) => `
     <div class="item"><div class="grow"><div class="name">${esc(p.name)}</div><div class="meta">${esc(p.minecraft)} · ${esc(p.loader_name)}</div></div>
       <div class="tools">
+        <button class="iconbtn go" data-act="play" data-i="${i}" title="Играть: выставит память и откроет TLauncher">${icon("player-play")}</button>
+        <button class="iconbtn" data-act="memory" data-i="${i}" title="Память для игры">${icon("cpu")}</button>
+        <button class="iconbtn" data-act="share" data-i="${i}" title="Поделиться сборкой с друзьями">${icon("share")}</button>
         <button class="iconbtn" data-act="open" data-i="${i}" title="Открыть папку игры">${icon("folder")}</button>
         <button class="iconbtn del" data-act="remove" data-i="${i}" title="Убрать из TLauncher">${icon("trash")}</button>
       </div></div>`).join("")
     : `<div class="empty">Пока пусто. Добавь сборку слева — она появится здесь и в TLauncher.</div>`;
 }
 
+// ---------- Рецепты сборок ----------
+
+// Поделиться: моды ищутся на Modrinth, конфиги пакуются в zip, сборка уходит автору на проверку
+async function shareRecipe(p) {
+  const done = dialog({title: `Поделиться — ${p.name}`, html: '<div class="muted">Ищу моды сборки на Modrinth…</div>', wide: true,
+    buttons: [{label: "Отмена", value: null}, {label: "Отправить на проверку", value: "sent", primary: true, check: async () => {
+      const err = $("#share-err");
+      if (!err) return false; // ещё идёт разбор
+      err.textContent = "Отправляю…";
+      try {
+        state.shareMessage = await api().share_submit($("#share-name").value, $("#share-desc").value, $("#share-nick").value);
+        return true;
+      } catch (e) {
+        err.textContent = errText(e);
+        return false;
+      }
+    }}]});
+  try {
+    const s = await api().share_scan(p.version_id);
+    const missing = s.missing.length
+      ? `<div class="warn">Нет на Modrinth — у друзей этих файлов не будет (${s.missing.length}): ${esc(s.missing.slice(0, 12).join(", "))}${s.missing.length > 12 ? " и др." : ""}</div>` : "";
+    $("#modal-body").innerHTML = `<div class="grid-form share-form">
+        <label class="field"><span>Название</span><input id="share-name" maxlength="60" value="${esc(s.name)}"></label>
+        <label class="field"><span>Твой ник — автор сборки</span><input id="share-nick" maxlength="16" value="${esc(state.info.nick || "")}"></label>
+      </div>
+      <label class="field"><span>Описание для друзей</span><textarea id="share-desc" maxlength="500" rows="3" placeholder="Что в сборке, на чём играем"></textarea></label>
+      <div class="kv">
+        <span>С Modrinth</span><span>${s.mods} файлов: моды, ресурспаки, шейдеры — друзья скачают их оттуда</span>
+        <span>Конфиги</span><span>${s.zip_files ? `${s.zip_files} файлов, ${s.zip_size < 2 ** 20 ? Math.ceil(s.zip_size / 1024) + " КБ" : (s.zip_size / 2 ** 20).toFixed(1) + " МБ"}` : "нет"}</span>
+      </div>
+      ${missing}
+      ${s.skipped.length ? `<div class="hint">Пропущены большие файлы конфигов: ${esc(s.skipped.slice(0, 5).join(", "))}</div>` : ""}
+      <div class="hint">Сборка уйдёт автору лаунчера на проверку и появится у всех в «Сборках друзей», когда он её одобрит.
+        Поменять её потом можешь только ты — с этого ника на этом компьютере.</div>
+      <div class="line" id="share-err"></div>`;
+  } catch (e) {
+    $("#modal-body").innerHTML = `<div class="hint">${esc(errText(e))}</div>`;
+  }
+  if (await done === "sent") showInfo("Сборка отправлена", state.shareMessage);
+}
+
+// Сборки друзей: одобренные рецепты, моды качаются с Modrinth
+async function friendRecipes() {
+  const done = dialog({title: "Сборки друзей", html: '<div class="muted">Загружаю список…</div>', wide: true,
+                       buttons: [{label: "Закрыть", value: null, primary: true}]});
+  let list = [];
+  try {
+    list = await api().recipe_list();
+    $("#modal-body").innerHTML = list.length ? `<div class="list">${list.map((r, i) => `<div class="item">
+        <div class="grow"><div class="name">${esc(r.name)} <span class="muted small">от ${esc(r.author)}</span></div>
+          <div class="meta">${esc(r.minecraft)} · ${esc(r.loader_name)} · ${r.mods} модов с Modrinth${r.missing ? ` · ${r.missing} без Modrinth` : ""}</div>
+          ${r.description ? `<div class="meta wrap">${esc(r.description)}</div>` : ""}</div>
+        <button class="btn${r.installed && !r.outdated ? "" : " primary"}" data-recipe="${i}">${r.outdated ? "Обновить" : r.installed ? "Переставить" : "Установить"}</button>
+      </div>`).join("")}</div>`
+      : `<div class="empty">Пока никто не поделился сборкой. Поделиться своей — кнопка ${icon("share")} в «Моих сборках».</div>`;
+  } catch (e) {
+    $("#modal-body").innerHTML = `<div class="hint">${esc(errText(e))}</div>`;
+  }
+  $("#modal-body").onclick = e => {
+    const b = e.target.closest("[data-recipe]");
+    if (!b) return;
+    $("#modal").classList.add("hidden");
+    installRecipe(list[b.dataset.recipe]);
+  };
+}
+
+async function installRecipe(r) {
+  if (state.busy) return;
+  state.busy = true;
+  $("#recipes-btn").disabled = true;
+  setStatus("custom", `Ставлю «${r.name}»…`);
+  setProgress("custom", 0);
+  try {
+    const res = await api().install_recipe(r.id, r.sha);
+    setStatus("custom", `Готово: «${res.version_id}»`);
+    loadProfiles();
+    showInfo("Сборка установлена", res.text);
+  } catch (e) {
+    setStatus("custom", "Ошибка, попробуй ещё раз");
+    showError("Не удалось поставить сборку:\n\n" + errText(e));
+  }
+  state.busy = false;
+  $("#recipes-btn").disabled = false;
+}
+
+// Память для игры: ползунок с советом лаунчера. key — id карточки или custom:<версия>
+async function memoryDialog(key, name, size = 0) {
+  const m = await api().memory_info(key, size || 0);
+  const html = `<div class="mem-row"><input type="range" id="mem-range" min="1" max="${m.max}" value="${m.gb}">
+      <b id="mem-val">${m.gb} ГБ</b></div>
+    <label class="check"><input type="checkbox" id="mem-auto"${m.auto ? " checked" : ""}><span>Как советует лаунчер (${m.recommended} ГБ)</span></label>
+    <div class="hint">У компьютера ${m.total} ГБ памяти${m.mods ? `, в сборке ${m.mods} модов` : ""}.
+      Больше — не всегда лучше: Windows и браузеру тоже нужна память, а лишние гигабайты игре почти не помогают.
+      Память выставляется в TLauncher, когда жмёшь «Играть» в лаунчере (TLauncher при этом должен быть закрыт).</div>`;
+  const done = dialog({title: `Память — ${name}`, html, buttons: [
+    {label: "Отмена", value: false},
+    {label: "Сохранить", value: true, primary: true, check: async () => {
+      try {
+        await api().set_memory(key, $("#mem-auto").checked ? null : Number($("#mem-range").value));
+        return true;
+      } catch (e) {
+        showError(errText(e));
+        return false;
+      }
+    }}]});
+  const range = $("#mem-range"), auto = $("#mem-auto");
+  const sync = () => { $("#mem-val").textContent = `${range.value} ГБ`; };
+  range.oninput = () => { auto.checked = false; sync(); };
+  auto.onchange = () => { if (auto.checked) { range.value = m.recommended; sync(); } };
+  return done;
+}
+
 async function profileAction(act, p) {
   if (act === "open") return api().open_folder(p.game_dir);
+  if (act === "memory") return memoryDialog(`custom:${p.version_id}`, p.name);
+  if (act === "share") return shareRecipe(p);
+  if (act === "play") {
+    try {
+      return showInfo("Готово", await api().play_custom(p.version_id));
+    } catch (e) {
+      return showError(errText(e));
+    }
+  }
   const ok = await confirmBox("Убрать сборку?", `Убрать версию «${p.version_id}» из TLauncher?\n\nПапка игры с мирами и настройками останется:\n${p.game_dir}`, "Убрать");
   if (!ok) return;
   try {
@@ -1095,6 +1220,11 @@ function bind() {
   $("#win-min").onclick = () => api().minimize();
   $("#win-close").onclick = () => api().close();
   $("#cards").onclick = e => {
+    const mem = e.target.closest("[data-mem]");
+    if (mem) {
+      const p = state.packs.find(x => x.id === mem.dataset.mem);
+      return p && memoryDialog(p.id, p.name, p.size).then(changed => changed && api().refresh_servers());
+    }
     const card = e.target.closest(".card");
     if (card) toggleCard(card.dataset.id);
   };
@@ -1111,6 +1241,7 @@ function bind() {
   $("#plan-mc").onchange = refreshLoader;
   $("#plan-loader").onchange = () => { setCustomBusy(false); refreshLoader(); };
   $("#plan-add").onclick = addPack;
+  $("#recipes-btn").onclick = friendRecipes;
   $("#profiles").onclick = e => {
     const b = e.target.closest("[data-act]");
     if (b) profileAction(b.dataset.act, state.profiles[b.dataset.i]);

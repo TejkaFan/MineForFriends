@@ -7,6 +7,7 @@
 Интерфейс — HTML-страница из папки ui/ в окне pywebview (WebView2).
 """
 import base64
+import ctypes
 import functools
 import hashlib
 import json
@@ -30,6 +31,7 @@ import webview
 import custom_packs
 from cloud_server import MAX_SKIN, NICK_RE, png_size, valid_skin_size
 import crashes
+import recipes
 import reports
 import screenshots
 import server_admin
@@ -37,7 +39,7 @@ import server_host
 import share
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.9.3"
+APP_VERSION = "0.9.4"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -450,15 +452,19 @@ class Updater:
         message = self.upload_texture(nick, data, "skin", slim)
         return f"{message} для {nick}. В игре он появится через несколько минут, после перезахода."
 
+    def nick_token(self, nick: str) -> str:
+        """Токен ника: создаётся при первой загрузке скина или сборки и хранится только у этого игрока."""
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,16}", nick or ""):
+            raise RuntimeError("Ник должен быть из 3–16 латинских букв, цифр или _ — как в TLauncher.")
+        state = load_json(self.state_file, {})
+        token = state.setdefault("skin_tokens", {}).setdefault(nick.lower(), secrets.token_urlsafe(24))
+        save_json(self.state_file, state)
+        return token
+
     def upload_texture(self, nick: str, data: bytes, kind: str, slim: bool = False) -> str:
         # kind: skin или cape; плащ с пустыми data — убрать плащ
-        if not re.fullmatch(r"[A-Za-z0-9_]{3,16}", nick):
-            raise RuntimeError("Ник должен быть из 3–16 латинских букв, цифр или _ — как в TLauncher.")
-        # Токен ника: создаётся при первой загрузке и хранится только у этого игрока
+        token = self.nick_token(nick)
         state = load_json(self.state_file, {})
-        tokens = state.setdefault("skin_tokens", {})
-        token = tokens.setdefault(nick.lower(), secrets.token_urlsafe(24))
-        save_json(self.state_file, state)
 
         self.status("Загружаю скин…" if kind == "skin" else "Загружаю плащ…")
         headers = {"X-Nick": nick, "X-Token": token, "X-Model": "slim" if slim else "default",
@@ -605,6 +611,9 @@ class Updater:
             return True
         return False
 
+    def friend_dir(self, entry: dict) -> Path:
+        return self.mc_dir / "friends" / custom_packs.slug(f"{entry['host']}-{entry['id']}")
+
     def install_shared(self, entry: dict) -> str:
         """Сборка сервера друга из Radmin: качается с его ПК и каждый раз подгоняется под его сервер."""
         name, host = entry["name"], entry["host"]
@@ -617,7 +626,7 @@ class Updater:
             raise RuntimeError(f"Не удалось получить сборку «{name}» у {host}.\n\nПроверь, что Radmin VPN "
                                f"включён и сервер ещё запущен.\n\n{e}") from None
         version_id = custom_packs.safe_name(f"{name} ({host})")
-        game_dir = self.mc_dir / "friends" / custom_packs.slug(f"{host}-{entry['id']}")
+        game_dir = self.friend_dir(entry)
         game_dir.mkdir(parents=True, exist_ok=True)
         (game_dir / ".mineserc_pack").write_text(version_id, "utf-8")  # по нему разбор вылетов узнаёт сборку
         ensure_server(game_dir / "servers.dat", name, f"{entry['ip']}:{entry['port']}")
@@ -643,12 +652,15 @@ class Updater:
     def run(self, open_tl: bool = True, pack_ids: list = None) -> str:
         ids = pack_ids or selected_packs()
         versions, notes = [], []
+        memory = []  # ГБ для каждой запускаемой сборки — TLauncher получит наибольшую
 
         # Свои серверы: сборка уже стоит, добавляем сервер в список серверов игры
         for s in shared_servers():
             if f"own:{s['id']}" in ids:
                 ensure_server(Path(s["game_dir"]) / "servers.dat", s["name"], f"localhost:{s['port']}")
                 versions.append(s["version_id"])
+                memory.append(pack_memory(f"own:{s['id']}", s["game_dir"]))
+                remember_dir(f"own:{s['id']}", s["game_dir"])
         # Серверы друзей из Radmin
         friends = [i for i in ids if i.startswith("radmin:")]
         if friends:
@@ -656,6 +668,8 @@ class Updater:
             for key in friends:
                 if key in found:
                     versions.append(self.install_shared(found[key]))
+                    memory.append(pack_memory(key, self.friend_dir(found[key])))
+                    remember_dir(key, self.friend_dir(found[key]))
 
         chosen = []
         if any(":" not in i for i in ids):
@@ -678,13 +692,109 @@ class Updater:
             if pack["enable"]:
                 self.enable_packs(game_dir, pack["enable"])
             versions.append(pack["version_id"])
+            memory.append(pack_memory(entry["id"], game_dir))
+            remember_dir(entry["id"], game_dir)
             if pack.get("note"):
                 notes.append(pack["note"])
 
         self.progress(1)
+        if open_tl and memory:
+            notes.append(apply_memory(max(memory)))
         which = f"версию «{versions[0]}»" if len(versions) == 1 else "нужную версию: «" + "» или «".join(versions) + "»"
         where = "В TLauncher" if open_tl and self.open_tlauncher() else "Открой TLauncher и"
         return f"Готово! {where} выбери {which} и нажми «Войти в игру».{' ' + ' '.join(notes) if notes else ''}"
+
+
+# ---------- Память для игры ----------
+#
+# TLauncher дописывает свой -Xmx в самый конец команды запуска, поэтому память из файла версии
+# он перебивает. Остаётся его общая настройка minecraft.memory.ram3 (МБ): лаунчер ставит туда
+# память запускаемой сборки прямо перед тем, как открыть TLauncher.
+
+def total_ram_gb() -> int:
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong),
+                    ("avail", ctypes.c_ulonglong), ("total_page", ctypes.c_ulonglong), ("avail_page", ctypes.c_ulonglong),
+                    ("total_virtual", ctypes.c_ulonglong), ("avail_virtual", ctypes.c_ulonglong),
+                    ("avail_extended", ctypes.c_ulonglong)]
+    status = MemoryStatus(length=ctypes.sizeof(MemoryStatus))
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return 8
+    return max(1, round(status.total / 2 ** 30))
+
+
+def max_game_memory() -> int:
+    # Windows и браузеру нужно хотя бы 2–3 ГБ, иначе игра начнёт тормозить из-за файла подкачки
+    total = total_ram_gb()
+    return max(2, total - (3 if total > 8 else 2))
+
+
+def recommended_memory(mods: int, size: int = 0) -> int:
+    """Сколько ГБ советовать сборке: по числу модов (или по размеру, пока она не скачана)."""
+    if not mods and size:
+        mods = 200 if size > 500 * 2 ** 20 else 60
+    need = 2 if mods == 0 else 4 if mods <= 60 else 6 if mods <= 180 else 8
+    return min(need, max_game_memory())
+
+
+def count_mods(game_dir) -> int:
+    folder = Path(game_dir) / "mods" if game_dir else None
+    return len(list(folder.glob("*.jar"))) if folder and folder.is_dir() else 0
+
+
+def pack_memory(key: str, game_dir=None, size: int = 0) -> int:
+    chosen = load_json(SETTINGS_FILE, {}).get("memory", {}).get(key)
+    return int(chosen) if chosen else recommended_memory(count_mods(game_dir), size)
+
+
+def remember_dir(key: str, game_dir) -> None:
+    # Папка сборки по id карточки — чтобы окно памяти знало, сколько в ней модов
+    settings = load_json(SETTINGS_FILE, {})
+    dirs = settings.setdefault("pack_dirs", {})
+    if dirs.get(key) != str(game_dir):
+        dirs[key] = str(game_dir)
+        save_json(SETTINGS_FILE, settings)
+
+
+def tlauncher_running() -> bool:
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def check(hwnd, _):
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        if length and ctypes.windll.user32.IsWindowVisible(hwnd):
+            buf = ctypes.create_unicode_buffer(length + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+            if buf.value.startswith("TLauncher"):
+                found.append(hwnd)
+        return True
+
+    ctypes.windll.user32.EnumWindows(check, 0)
+    return bool(found)
+
+
+def set_tlauncher_memory(gb: int) -> bool:
+    """Меняет только строку памяти в настройках TLauncher. False — TLauncher ещё не запускался."""
+    try:
+        text = TL_PROPERTIES.read_text("utf-8", errors="surrogateescape")
+    except OSError:
+        return False
+    line = f"minecraft.memory.ram3={gb * 1024}"
+    if re.search(r"^minecraft\.memory\.ram3=.*$", text, re.M):
+        text = re.sub(r"^minecraft\.memory\.ram3=.*$", line, text, count=1, flags=re.M)
+    else:
+        text = text.rstrip("\r\n") + ("\r\n" if "\r\n" in text else "\n") + line + "\n"
+    TL_PROPERTIES.write_text(text, "utf-8", errors="surrogateescape")
+    return True
+
+
+def apply_memory(gb: int) -> str:
+    """Ставит память в TLauncher; текст для сообщения игроку."""
+    if tlauncher_running():
+        return (f"TLauncher уже открыт — память ({gb} ГБ) не поменять. Закрой его и нажми «Играть» ещё раз "
+                "или выставь память в настройках TLauncher.")
+    set_tlauncher_memory(gb)
+    return f"Памяти для игры: {gb} ГБ."
 
 
 def custom_profiles() -> list:
@@ -1043,6 +1153,7 @@ class Api:
             t.join()
         for c in cards:
             c["status"] = results.get(c["id"])
+            c["memory"] = pack_memory(c["id"], self._memory_dir(c["id"]), c.get("size") or 0)
         return {"cloud": cloud_ok, "packs": cards, "selected": selected_packs(), "radmin": radmin_state()}
 
     def open_radmin(self) -> None:
@@ -1126,6 +1237,96 @@ class Api:
         text = f"В TLauncher выбери версию «{res['version_id']}» и нажми «Войти в игру»."
         if chosen["mods"] > 150:
             text += "\n\nСборка большая — выдели в настройках TLauncher не меньше 6 ГБ памяти."
+        if res["notes"]:
+            text += "\n\n" + "\n".join(res["notes"])
+        return {"version_id": res["version_id"], "text": text}
+
+    # ---- Память для игры
+    # key — id карточки на «Наших серверах» или custom:<версия> для своей сборки
+
+    def _memory_dir(self, key: str):
+        if key.startswith("custom:"):
+            profile = next((p for p in custom_profiles() if p["version_id"] == key[7:]), None)
+            return profile and profile["game_dir"]
+        if key.startswith("own:"):
+            shared = next((s for s in shared_servers() if f"own:{s['id']}" == key), None)
+            if shared:
+                return shared["game_dir"]
+        if key == DEFAULT_PACK["id"]:
+            return self._mc_dir / DEFAULT_PACK["game_dir"]
+        return load_json(SETTINGS_FILE, {}).get("pack_dirs", {}).get(key)
+
+    def memory_info(self, key: str, size: int = 0) -> dict:
+        mods = count_mods(self._memory_dir(key))
+        recommended = recommended_memory(mods, size or 0)
+        chosen = load_json(SETTINGS_FILE, {}).get("memory", {}).get(key)
+        return {"gb": int(chosen) if chosen else recommended, "auto": not chosen, "recommended": recommended,
+                "mods": mods, "total": total_ram_gb(), "max": max(max_game_memory(), int(chosen or 0))}
+
+    def set_memory(self, key: str, gb) -> None:
+        settings = load_json(SETTINGS_FILE, {})
+        memory = settings.setdefault("memory", {})
+        if gb is None:
+            memory.pop(key, None)  # снова «как советует лаунчер»
+        else:
+            gb = int(gb)
+            if not 1 <= gb <= total_ram_gb():
+                raise RuntimeError(f"Памяти можно дать от 1 до {total_ram_gb()} ГБ.")
+            memory[key] = gb
+        save_json(SETTINGS_FILE, settings)
+
+    def play_custom(self, version_id: str) -> str:
+        profile = next((p for p in custom_profiles() if p["version_id"] == version_id), None)
+        if not profile:
+            raise RuntimeError("Сборка не найдена.")
+        note = apply_memory(pack_memory(f"custom:{version_id}", profile["game_dir"]))
+        where = "В TLauncher" if Updater(lambda s: None, lambda v: None).open_tlauncher() else "Открой TLauncher и"
+        return f"{where} выбери версию «{version_id}» и нажми «Войти в игру». {note}"
+
+    # ---- Рецепты: поделиться своей сборкой и поставить сборку друга
+
+    def share_scan(self, version_id: str) -> dict:
+        profile = next((p for p in custom_profiles() if p["version_id"] == version_id), None)
+        if not profile:
+            raise RuntimeError("Сборка не найдена.")
+        scanned = recipes.scan(Path(profile["game_dir"]), self._status("custom"))
+        self._share = (profile, scanned)
+        # Сборку, поставленную из рецепта друга, предлагаем под исходным названием
+        name = profile.get("recipe_name") or profile["name"]
+        return {"name": name, "mods": len(scanned["mods"]), "missing": scanned["missing"],
+                "zip_files": scanned["zip_files"], "zip_size": scanned["zip_size"], "skipped": scanned["skipped"],
+                "id": recipes.recipe_id(name)}
+
+    def share_submit(self, name: str, description: str, nick: str) -> str:
+        if not getattr(self, "_share", None):
+            raise RuntimeError("Сначала выбери сборку.")
+        if not name.strip():
+            raise RuntimeError("Впиши название сборки.")
+        profile, scanned = self._share
+        token = Updater(lambda s: None, lambda v: None).nick_token(nick.strip())
+        message = recipes.submit(profile, scanned, name, description, nick.strip(), token)
+        self._share = None
+        return message
+
+    def recipe_list(self) -> list:
+        installed = {p.get("recipe"): p for p in custom_profiles() if p.get("recipe")}
+        items = recipes.listing()
+        for r in items:
+            p = installed.get(r["id"])
+            r["installed"] = bool(p)
+            r["outdated"] = bool(p) and p.get("recipe_sha") != r["sha"]
+            r["loader_name"] = custom_packs.LOADER_NAMES.get(r["loader"], r["loader"])
+        return items
+
+    def install_recipe(self, recipe_id: str, sha: str) -> dict:
+        res, recipe = recipes.install({"id": recipe_id, "sha": sha}, self._mc_dir,
+                                      status=self._status("custom"), progress=self._progress("custom"))
+        if res["loader"] != "vanilla":
+            setup_skin_loader(Path(res["game_dir"]))
+        fields = {k: res[k] for k in ("name", "version_id", "game_dir", "minecraft", "loader", "loader_version")}
+        fields.update(recipe=recipe["id"], recipe_sha=sha, recipe_name=recipe["name"])
+        save_custom_profiles([p for p in custom_profiles() if p["version_id"] != res["version_id"]] + [fields])
+        text = f"Сборка «{res['version_id']}» готова. Нажми ▶ у неё в «Моих сборках» — лаунчер выставит память и откроет TLauncher."
         if res["notes"]:
             text += "\n\n" + "\n".join(res["notes"])
         return {"version_id": res["version_id"], "text": text}

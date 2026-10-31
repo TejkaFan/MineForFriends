@@ -21,11 +21,17 @@
  *                  ошибке лаунчера. Становится задачей (issue) в закрытом репозитории отчётов;
  *                  повтор той же ошибки (та же signature) — комментарием к открытой задаче.
  *
+ *   POST /recipe   рецепт сборки: первая строка тела — JSON рецепта, дальше (по желанию) zip конфигов
+ *                  в base64; заголовки X-Nick, X-Token. Становится Pull Request в репозиторий скинов:
+ *                  recipes/<id>/recipe.json, files.zip, owner.json. Сборка появится у всех, когда
+ *                  автор лаунчера примет PR (Merge). Моды в рецепте — только ссылки на Modrinth.
+ *   GET  /recipes  принятые рецепты: [{id, sha}] — сами recipe.json лаунчер берёт с raw.githubusercontent.com
+ *
  * Настройки Worker:
  *   SKINS_REPO     переменная, например TejkaFan/MineForFriends-skins
  *   REPORTS_REPO   переменная, по умолчанию TejkaFan/MineForFriends-reports
- *   GITHUB_TOKEN   секрет: fine-grained токен с правами Contents: Read and write на репозиторий
- *                  скинов и Issues: Read and write на репозиторий отчётов
+ *   GITHUB_TOKEN   секрет: fine-grained токен с правами Contents: Read and write и Pull requests:
+ *                  Read and write на репозиторий скинов и Issues: Read and write на репозиторий отчётов
  *   LIMITS         привязка KV namespace (по желанию): счётчики защиты от спама. Без неё
  *                  лимиты считаются только в памяти Worker — слабее, но тоже работает.
  *
@@ -46,6 +52,7 @@ const MINUTE = 60, HOUR = 3600, DAY = 86400;
 const LIMITS_RULES = {
   upload: [["ip", 6, 10 * MINUTE], ["ip", 30, DAY], ["all", 300, DAY]],
   report: [["ip", 10, HOUR], ["ip", 40, DAY], ["all", 200, DAY]],
+  recipe: [["ip", 5, DAY], ["all", 40, DAY]],
 };
 const MAX_COMMENTS = 50;
 const memory = new Map(); // счётчики, пока жив этот экземпляр Worker
@@ -53,7 +60,7 @@ const memory = new Map(); // счётчики, пока жив этот экзе
 export default {
   async fetch(request, env) {
     const {pathname} = new URL(request.url);
-    const action = {"/upload": "upload", "/cape": "upload", "/report": "report"}[pathname];
+    const action = {"/upload": "upload", "/cape": "upload", "/report": "report", "/recipe": "recipe"}[pathname];
     if (request.method === "POST" && action) {
       const wait = await limited(env, action, request.headers.get("CF-Connecting-IP") || "?");
       if (wait) return reply(429, `Слишком много запросов, попробуй через ${wait}`);
@@ -72,6 +79,22 @@ export default {
       } catch (e) {
         console.error(e);
         return reply(502, "Не удалось сохранить отчёт, GitHub недоступен");
+      }
+    }
+    if (request.method === "POST" && pathname === "/recipe") {
+      try {
+        return await recipe(request, env);
+      } catch (e) {
+        console.error(e);
+        return reply(502, "GitHub сейчас недоступен, попробуй позже");
+      }
+    }
+    if (request.method === "GET" && pathname === "/recipes") {
+      try {
+        return await recipes(env);
+      } catch (e) {
+        console.error(e);
+        return reply(502, "GitHub сейчас недоступен, попробуй позже");
       }
     }
     if (request.method === "GET" && pathname === "/") return reply(200, "MineForFriends: загрузка скинов работает");
@@ -280,4 +303,118 @@ async function report(request, env) {
     await github(env, "POST", "issues", {title, body}, repo);
   }
   return reply(200, "Отчёт отправлен автору");
+}
+
+// ---------- Рецепты сборок ----------
+
+const RECIPE_ID_RE = /^[a-z0-9][a-z0-9_-]{1,39}$/;
+const RECIPE_LOADERS = ["vanilla", "fabric", "quilt", "forge", "neoforge"];
+const RECIPE_PATH_RE = /^(mods|resourcepacks|shaderpacks)\/[^/\\]{1,200}$/;
+const MODRINTH_CDN = "https://cdn.modrinth.com/data/";
+const MAX_RECIPE = 7 << 20; // JSON + zip конфигов в base64 (4 МБ zip ≈ 5.4 МБ текста)
+const MAX_RECIPE_JSON = 512 * 1024;
+
+function checkRecipe(r) {
+  // Ответ — текст ошибки или null. В рецепт попадает только то, что здесь проверено
+  if (!r || typeof r !== "object") return "Неверный рецепт";
+  if (!RECIPE_ID_RE.test(String(r.id))) return "Неверный id сборки";
+  if (!String(r.name || "").trim() || String(r.name).length > 60) return "Название — от 1 до 60 символов";
+  if (String(r.description || "").length > 500) return "Описание — до 500 символов";
+  if (!/^[0-9a-z.\-_ ]{2,30}$/i.test(String(r.minecraft))) return "Неверная версия Minecraft";
+  if (!RECIPE_LOADERS.includes(r.loader)) return "Неизвестный загрузчик";
+  if (String(r.loader_version || "").length > 60) return "Неверная версия загрузчика";
+  if (!Array.isArray(r.mods) || r.mods.length > 800) return "Слишком много модов";
+  for (const m of r.mods) {
+    if (!m || !RECIPE_PATH_RE.test(String(m.path)) || !String(m.url).startsWith(MODRINTH_CDN)
+        || !/^[0-9a-f]{40}$/.test(String(m.sha1)) || String(m.title || "").length > 100) {
+      return `Мод ${String(m?.path).slice(0, 80)}: только файлы с Modrinth`;
+    }
+  }
+  if (!Array.isArray(r.missing || []) || (r.missing || []).length > 800) return "Неверный список модов без Modrinth";
+  return null;
+}
+
+async function recipe(request, env) {
+  const nick = request.headers.get("X-Nick") || "";
+  const token = request.headers.get("X-Token") || "";
+  if (!NICK_RE.test(nick) || token.length < 16) return reply(400, "Нужен ник (как в TLauncher) — он будет автором сборки");
+  if (Number(request.headers.get("Content-Length") || 0) > MAX_RECIPE) return reply(413, "Конфиги сборки слишком большие");
+  const raw = await request.text();
+  if (raw.length > MAX_RECIPE) return reply(413, "Конфиги сборки слишком большие");
+  const cut = raw.indexOf("\n");
+  const head = cut < 0 ? raw : raw.slice(0, cut);
+  const files = cut < 0 ? "" : raw.slice(cut + 1).trim();
+  if (head.length > MAX_RECIPE_JSON) return reply(413, "Рецепт слишком большой");
+  let r;
+  try {
+    r = JSON.parse(head);
+  } catch {
+    return reply(400, "Неверный рецепт");
+  }
+  const bad = checkRecipe(r);
+  if (bad) return reply(400, bad);
+
+  const entry = {
+    id: r.id, name: clean(r.name, 60), description: String(r.description || "").trim().slice(0, 500),
+    author: nick, minecraft: r.minecraft, loader: r.loader, loader_version: String(r.loader_version || ""),
+    mods: r.mods.map(m => ({path: m.path, url: m.url, sha1: m.sha1, size: Number(m.size) || 0,
+                            title: clean(m.title, 100), project: clean(m.project, 20)})),
+    missing: (r.missing || []).map(x => clean(x, 120)),
+    files: Boolean(files), updated: new Date().toISOString().slice(0, 19) + "Z",
+  };
+  const dir = `recipes/${entry.id}`;
+  const tokenHash = await sha256hex(new TextEncoder().encode(token));
+  const existing = await github(env, "GET", `contents/${dir}?ref=${BRANCH}`) || [];
+  const ownerFile = existing.find(f => f.name === "owner.json")
+    && await github(env, "GET", `contents/${dir}/owner.json?ref=${BRANCH}`);
+  const owner = ownerFile ? JSON.parse(fromBase64Text(ownerFile.content)) : null;
+  if (owner && owner.token !== tokenHash) {
+    return reply(403, `Сборка «${entry.id}» уже есть у ${owner.nick}. Назови свою по-другому.`);
+  }
+
+  const ref = await github(env, "GET", `git/ref/heads/${BRANCH}`);
+  const head_ = await github(env, "GET", `git/commits/${ref.object.sha}`);
+  const tree = [
+    {path: `${dir}/recipe.json`, mode: "100644", type: "blob", content: JSON.stringify(entry, null, 1)},
+    {path: `${dir}/owner.json`, mode: "100644", type: "blob", content: JSON.stringify({nick, token: tokenHash})},
+  ];
+  if (files) {
+    // base64 уходит в GitHub как есть — Worker его не разбирает (на бесплатном тарифе мало времени CPU)
+    const blob = await github(env, "POST", "git/blobs", {content: files, encoding: "base64"});
+    tree.push({path: `${dir}/files.zip`, mode: "100644", type: "blob", sha: blob.sha});
+  } else if (existing.some(f => f.name === "files.zip")) {
+    tree.push({path: `${dir}/files.zip`, mode: "100644", type: "blob", sha: null});
+  }
+  const newTree = await github(env, "POST", "git/trees", {base_tree: head_.tree.sha, tree});
+  const what = owner ? "Обновление сборки" : "Сборка";
+  const commit = await github(env, "POST", "git/commits", {
+    message: `${what} «${entry.name}» от ${nick}`, tree: newTree.sha, parents: [ref.object.sha],
+  });
+  const branch = `recipe/${entry.id}-${Date.now()}`;
+  await github(env, "POST", "git/refs", {ref: `refs/heads/${branch}`, sha: commit.sha});
+  // @ник в тексте заявки GitHub превратит в упоминание — разрываем его невидимым пробелом
+  const md = s => String(s).replace(/@/g, "@​");
+  const list = entry.mods.slice(0, 150).map(m => `- ${md(m.title || m.path)}`).join("\n");
+  const body = [
+    `**Автор:** ${nick} · **Minecraft** ${entry.minecraft} · **${entry.loader}** ${md(entry.loader_version)}`,
+    entry.description && `> ${md(entry.description).replace(/\n/g, "\n> ")}`,
+    `**Модов и ресурспаков с Modrinth:** ${entry.mods.length}` + (entry.mods.length > 150 ? " (ниже первые 150)" : ""),
+    list,
+    entry.missing.length && `**Нет на Modrinth (у друзей их не будет):** ${md(entry.missing.slice(0, 50).join(", "))}`,
+    files ? `**Конфиги:** files.zip, ${(files.length * 3 / 4 / 2 ** 20).toFixed(1)} МБ — загляни внутрь, если сомневаешься` : "**Конфигов нет**",
+    "Принять — **Merge pull request**: сборка появится у всех в лаунчере. Отклонить — **Close**.",
+  ].filter(Boolean).join("\n\n");
+  const pr = await github(env, "POST", "pulls", {title: `${what} «${md(entry.name)}» от ${nick}`, head: branch, base: BRANCH, body});
+  return reply(200, `Сборка отправлена на проверку (заявка №${pr.number}). Она появится у всех, когда автор лаунчера её одобрит.`);
+}
+
+async function recipes(env) {
+  const tree = await github(env, "GET", `git/trees/${BRANCH}?recursive=1`);
+  const items = (tree?.tree || [])
+    .map(t => [t, /^recipes\/([a-z0-9][a-z0-9_-]{1,39})\/recipe\.json$/.exec(t.path)])
+    .filter(([, m]) => m)
+    .map(([t, m]) => ({id: m[1], sha: t.sha}));
+  return new Response(JSON.stringify({ok: true, recipes: items}), {
+    headers: {"Content-Type": "application/json; charset=utf-8"},
+  });
 }
