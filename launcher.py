@@ -10,9 +10,11 @@ import json
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import webbrowser
 from pathlib import Path
@@ -32,7 +34,10 @@ MOJANG_MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.js
 DEFAULT_PACK = {
     "id": "mineserc", "name": "MineSerc 26.3", "manifest": "manifest.json", "base": "",
     "version_id": "MineSerc 26.3", "game_dir": "mineserc", "server_name": "MineSerc",
+    "server": "26.199.180.115:25565",
 }
+# Как часто обновлять индикатор серверов, мс
+STATUS_REFRESH = 30_000
 
 # К облаку ходим напрямую: системный прокси (VPN-клиенты) не видит сеть Radmin
 cloud = requests.Session()
@@ -85,6 +90,54 @@ def ensure_server(path: Path, name: str, ip: str) -> None:
         rest = data[len(head) + 5:]
         path.write_bytes(head + b"\x0a" + (1).to_bytes(4, "big") + entry + rest)
     # Иначе формат неожиданный — файл не трогаем
+
+
+def varint(n: int) -> bytes:
+    n &= 0xFFFFFFFF
+    out = b""
+    while True:
+        byte, n = n & 0x7F, n >> 7
+        out += bytes([byte | (0x80 if n else 0)])
+        if not n:
+            return out
+
+
+def server_status(address: str, timeout: float = 3):
+    """Опрос сервера как в списке серверов игры: {"online", "max", "version"} или None, если выключен."""
+    host, _, port = address.rpartition(":")
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            host_b = host.encode()
+            # Рукопожатие (протокол -1 — «любой») и запрос статуса
+            hello = b"\x00" + varint(-1) + varint(len(host_b)) + host_b + int(port).to_bytes(2, "big") + varint(1)
+            # Отдельными посылками, как игра: модовый сервер может не успеть переключиться
+            # на запрос статуса, если оба пакета придут одним куском
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.sendall(varint(len(hello)) + hello)
+            time.sleep(0.1)
+            sock.sendall(b"\x01\x00")
+            f = sock.makefile("rb")
+
+            def read_varint():
+                value = 0
+                for i in range(5):
+                    b = f.read(1)
+                    if not b:
+                        raise OSError("соединение закрыто")
+                    value |= (b[0] & 0x7F) << (7 * i)
+                    if not b[0] & 0x80:
+                        return value
+                raise OSError("неверный ответ")
+
+            read_varint()  # длина пакета
+            read_varint()  # id пакета
+            data = json.loads(f.read(read_varint()).decode("utf-8", "replace"))
+    except (OSError, ValueError):
+        return None
+    players = data.get("players") or {}
+    return {"online": players.get("online", 0), "max": players.get("max", 0),
+            "version": (data.get("version") or {}).get("name", "")}
 
 
 def tlauncher_nick(mc_dir: Path) -> str:
@@ -404,12 +457,16 @@ def run_gui() -> None:
 
     ttk.Label(frm, text="MineSerc", font=("Segoe UI", 18, "bold")).grid(column=0, row=0, pady=(0, 4))
     ttk.Label(frm, text="Обновление модов и версии для TLauncher").grid(column=0, row=1, pady=(0, 8))
+    servers = ttk.LabelFrame(frm, text="Серверы", padding=8)
+    servers.grid(column=0, row=2, pady=(0, 10), sticky="we")
+    servers.columnconfigure(1, weight=1)
+    ttk.Label(servers, text="Проверяю…", foreground="gray").grid(column=0, row=0, sticky="w")
     bar = ttk.Progressbar(frm, length=340, maximum=1.0)
-    bar.grid(column=0, row=2, pady=(4, 4))
+    bar.grid(column=0, row=3, pady=(4, 4))
     status_var = tk.StringVar(value="Нажми «Обновить и открыть TLauncher»")
-    ttk.Label(frm, textvariable=status_var, wraplength=340).grid(column=0, row=3, sticky="w")
+    ttk.Label(frm, textvariable=status_var, wraplength=340).grid(column=0, row=4, sticky="w")
     actions = ttk.Frame(frm)
-    actions.grid(column=0, row=4, pady=(12, 0), sticky="we")
+    actions.grid(column=0, row=5, pady=(12, 0), sticky="we")
     actions.columnconfigure(0, weight=1)
     go = ttk.Button(actions, text="Обновить и открыть TLauncher")
     go.grid(column=0, row=0, sticky="we")
@@ -418,7 +475,7 @@ def run_gui() -> None:
 
     # Скин: ник как в TLauncher, тип модели и выбор PNG
     skin = ttk.LabelFrame(frm, text="Скин на сервере", padding=8)
-    skin.grid(column=0, row=5, pady=(14, 0), sticky="we")
+    skin.grid(column=0, row=6, pady=(14, 0), sticky="we")
     skin.columnconfigure(2, weight=1)
     probe = Updater(lambda s: None, lambda v: None)
     nick_var = tk.StringVar(value=load_json(probe.state_file, {}).get("skin_nick") or tlauncher_nick(probe.mc_dir))
@@ -437,6 +494,50 @@ def run_gui() -> None:
 
     def ui(fn, *a):
         root.after(0, fn, *a)
+
+    def show_servers(entries, statuses):
+        # Индикатор: какой сервер сейчас включён и доступно ли облако со сборками
+        for w in servers.winfo_children():
+            w.destroy()
+        if entries is None:
+            ttk.Label(servers, text="●", foreground="#c62828").grid(column=0, row=0, sticky="w")
+            ttk.Label(servers, text="Облако недоступно — сборки сейчас не загрузить.\nПроверь Radmin VPN или подожди, пока хост включит сервер.",
+                      wraplength=310).grid(column=1, row=0, sticky="w", padx=(6, 0))
+            return
+        chosen = set(selected_packs())
+        for i, (e, st) in enumerate(zip(entries, statuses)):
+            name = e["name"] + ("" if e["id"] in chosen else " (не выбрана)")
+            if st:
+                color, text = "#2e7d32", f"включён · игроков {st['online']}/{st['max']}"
+            else:
+                color, text = "#9e9e9e", "выключен"
+            ttk.Label(servers, text="●", foreground=color).grid(column=0, row=i, sticky="w")
+            ttk.Label(servers, text=name).grid(column=1, row=i, sticky="w", padx=(6, 12))
+            ttk.Label(servers, text=text, foreground=color).grid(column=2, row=i, sticky="e")
+        ttk.Label(servers, text="Облако доступно — все сборки можно загрузить", foreground="gray").grid(
+            column=0, row=len(entries), columnspan=3, sticky="w", pady=(6, 0))
+
+    def status_worker(again):
+        try:
+            entries = Updater(lambda s: None, lambda v: None).fetch_packs()
+        except Exception:
+            entries = None
+        statuses = []
+        if entries is not None:
+            results = {}
+            threads = [threading.Thread(target=lambda e=e: results.__setitem__(e["id"], server_status(e.get("server") or DEFAULT_PACK["server"])))
+                       for e in entries]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            statuses = [results.get(e["id"]) for e in entries]
+        ui(show_servers, entries, statuses)
+        if again:
+            ui(root.after, STATUS_REFRESH, refresh_servers)
+
+    def refresh_servers(again=True):
+        threading.Thread(target=status_worker, args=(again,), daemon=True).start()
 
     def worker():
         upd = Updater(lambda s: ui(status_var.set, s), lambda v: ui(bar.configure, {"value": v}))
@@ -482,6 +583,7 @@ def run_gui() -> None:
             names = ", ".join(e["name"] for e in entries if e["id"] in ids)
             status_var.set(f"Выбрано: {names}. Нажми «Обновить и открыть TLauncher».")
             win.destroy()
+            refresh_servers(again=False)
 
         ttk.Button(box, text="Сохранить", command=save).grid(column=0, row=1 + 2 * len(entries), sticky="e", pady=(10, 0))
 
@@ -524,6 +626,7 @@ def run_gui() -> None:
     go.configure(command=on_go)
     packs_btn.configure(command=on_packs)
     pick.configure(command=on_pick)
+    refresh_servers()
     root.mainloop()
 
 

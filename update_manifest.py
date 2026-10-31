@@ -80,7 +80,7 @@ def main_pack() -> dict:
         print(f"  {p['file']}")
     size = sum(m["size"] for m in mods + packs)
     return {"id": "mineserc", "name": SETTINGS["name"], "description": SETTINGS["description"],
-            "manifest": "manifest.json", "base": "", "size": size}
+            "manifest": "manifest.json", "base": "", "size": size, "server": SETTINGS["server"]}
 
 
 def extra_pack(folder: Path) -> dict:
@@ -96,7 +96,8 @@ def extra_pack(folder: Path) -> dict:
     mods = sum(1 for f in files if f["path"].startswith("mods/"))
     print(f"[{folder.name}] {len(files)} файлов, {mods} модов, {size / 2**20:.0f} МБ{'' if changed else ' (без изменений)'}")
     return {"id": folder.name, "name": settings["name"], "description": settings.get("description", ""),
-            "manifest": f"packs/{folder.name}/manifest.json", "base": f"packs/{folder.name}/", "size": size}
+            "manifest": f"packs/{folder.name}/manifest.json", "base": f"packs/{folder.name}/", "size": size,
+            "server": settings["server"]}
 
 
 def main() -> None:
