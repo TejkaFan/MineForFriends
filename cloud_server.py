@@ -1,6 +1,7 @@
-"""Раздаёт папку launcher-cloud (манифест, моды, ресурспаки, скины) для лаунчера друзей.
+"""Раздаёт папку launcher-cloud (сборки, моды, ресурспаки, скины) для лаунчера друзей.
 
-Запускается из start.bat вместе с сервером Minecraft. Порт 8518.
+Запускается из start.bat любого из серверов (MineSerc, Homestead). Порт 8518;
+если облако уже запущено, второй экземпляр сразу закрывается.
 
 Скины (для мода CustomSkinLoader, тип CustomSkinAPI):
     GET  /skins/<ник>.json        профиль {"username", "skins": {"default"|"slim": <хэш>}}
@@ -13,6 +14,7 @@ import functools
 import hashlib
 import json
 import re
+import socket
 import sys
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -127,9 +129,25 @@ class Handler(SimpleHTTPRequestHandler):
         sys.stdout.flush()
 
 
+class CloudServer(ThreadingHTTPServer):
+    # На Windows SO_REUSEADDR позволяет второму облаку занять тот же порт;
+    # с эксклюзивным портом второй экземпляр просто не запустится
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def main() -> None:
     handler = functools.partial(Handler, directory=str(CLOUD))
-    with ThreadingHTTPServer(("0.0.0.0", PORT), handler) as httpd:
+    try:
+        httpd = CloudServer(("0.0.0.0", PORT), handler)
+    except OSError:
+        print(f"Порт {PORT} уже занят — облако уже запущено, второе не нужно.")
+        return
+    with httpd:
         print(f"Облако модов: {CLOUD} на порту {PORT}")
         httpd.serve_forever()
 

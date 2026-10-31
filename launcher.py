@@ -1,7 +1,8 @@
 """Обновлятор MineSerc для TLauncher.
 
-Создаёт в TLauncher версию «MineSerc 26.3» (Fabric, сервер в «Сетевой игре»),
-синхронизирует моды и ресурспаки с облака на ПК хоста (через Radmin) и открывает TLauncher.
+Для каждой выбранной сборки (кнопка «Сборки…») создаёт в TLauncher свою версию
+(Fabric, сервер в «Сетевой игре», отдельная папка игры), синхронизирует её файлы
+с облака на ПК хоста (через Radmin) и открывает TLauncher.
 Ещё загружает скин игрока в облако; в игре его показывает мод CustomSkinLoader.
 """
 import hashlib
@@ -20,12 +21,18 @@ import requests
 
 APP_NAME = "MineSerc"
 CLOUD_URL = "http://26.199.180.115:8518"
-VERSION_ID = "MineSerc 26.3"
 # Каталог скинов: там можно скачать PNG и выбрать его кнопкой «Выбрать скин»
 SKINS_SITE = "https://www.minecraftskins.com/"
 APPDATA = Path(os.environ.get("APPDATA", Path.home()))
 TL_PROPERTIES = APPDATA / ".tlauncher" / "tlauncher-2.0.properties"
+SETTINGS_FILE = APPDATA / APP_NAME / "settings.json"
 MOJANG_MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+
+# Основная сборка; старый манифест облака не содержит этих полей
+DEFAULT_PACK = {
+    "id": "mineserc", "name": "MineSerc 26.3", "manifest": "manifest.json", "base": "",
+    "version_id": "MineSerc 26.3", "game_dir": "mineserc", "server_name": "MineSerc",
+}
 
 # К облаку ходим напрямую: системный прокси (VPN-клиенты) не видит сеть Radmin
 cloud = requests.Session()
@@ -101,18 +108,51 @@ def minecraft_dir() -> Path:
     return APPDATA / ".minecraft"
 
 
+def selected_packs() -> list:
+    return load_json(SETTINGS_FILE, {}).get("packs") or [DEFAULT_PACK["id"]]
+
+
+def save_selected_packs(ids: list) -> None:
+    settings = load_json(SETTINGS_FILE, {})
+    settings["packs"] = ids
+    save_json(SETTINGS_FILE, settings)
+
+
+def normalize_pack(entry: dict, manifest: dict) -> dict:
+    """Приводит манифест сборки к одному виду: список файлов с путями внутри папки игры."""
+    pack = {**DEFAULT_PACK, **entry, **{k: v for k, v in manifest.items() if k not in ("files", "mods", "resourcepacks")}}
+    if "files" in manifest:
+        pack["files"] = manifest["files"]
+        pack["enable"] = manifest.get("enable_resourcepacks", [])
+    else:
+        # Старый формат основной сборки: отдельные списки модов и ресурспаков
+        mods = manifest.get("mods", [])
+        packs = manifest.get("resourcepacks", [])
+        pack["files"] = ([{"path": f"mods/{m['file']}", "sha1": m["sha1"], "size": m["size"]} for m in mods]
+                         + [{"path": f"resourcepacks/{p['file']}", "sha1": p["sha1"], "size": p["size"]} for p in packs])
+        pack["enable"] = [p["file"] for p in packs]
+    pack.setdefault("once", [])
+    return pack
+
+
+def inside(base: Path, rel: str):
+    # Путь из манифеста не должен выводить за пределы папки игры
+    path = (base / rel).resolve()
+    return path if base.resolve() in path.parents else None
+
+
 class Updater:
     def __init__(self, status, progress):
         self.status = status
         self.progress = progress
         self.mc_dir = minecraft_dir()
-        self.game_dir = self.mc_dir / "mineserc"
+        # Тут же хранятся ник и токены скинов
+        self.game_dir = self.mc_dir / DEFAULT_PACK["game_dir"]
         self.state_file = self.game_dir / "launcher_state.json"
 
-    def fetch_manifest(self) -> dict:
-        self.status("Связь с сервером…")
+    def fetch_json(self, path: str):
         try:
-            r = cloud.get(f"{CLOUD_URL}/manifest.json", timeout=8)
+            r = cloud.get(f"{CLOUD_URL}/{path}", timeout=8)
             r.raise_for_status()
             return r.json()
         except requests.RequestException as e:
@@ -121,19 +161,31 @@ class Updater:
                 "а хост включил сервер.\n\n" + str(e)
             ) from None
 
-    def build_version(self, mc: str, loader: str) -> dict:
-        # Склеиваем ванильный 26.3 и профиль Fabric в одну самостоятельную версию
-        self.status(f"Подготовка версии {VERSION_ID}…")
+    def fetch_packs(self) -> list:
+        self.status("Связь с сервером…")
+        try:
+            r = cloud.get(f"{CLOUD_URL}/packs.json", timeout=8)
+            if r.status_code == 404:
+                return [dict(DEFAULT_PACK)]  # облако без списка сборок
+            r.raise_for_status()
+            return r.json()["packs"]
+        except requests.RequestException:
+            return [dict(DEFAULT_PACK)] if self.fetch_json(DEFAULT_PACK["manifest"]) else []
+
+    def build_version(self, pack: dict, game_dir: Path) -> dict:
+        # Склеиваем ванильную версию и профиль Fabric в одну самостоятельную версию
+        mc, loader = pack["minecraft"], pack["fabric_loader"]
+        self.status(f"Подготовка версии {pack['version_id']}…")
         entry = next(v for v in web.get(MOJANG_MANIFEST, timeout=20).json()["versions"] if v["id"] == mc)
         vanilla = web.get(entry["url"], timeout=20).json()
         fabric = web.get(f"https://meta.fabricmc.net/v2/versions/loader/{mc}/{loader}/profile/json", timeout=20).json()
 
-        game_args = [str(self.game_dir) if a == "${game_directory}" else a for a in vanilla["arguments"]["game"]]
+        game_args = [str(game_dir) if a == "${game_directory}" else a for a in vanilla["arguments"]["game"]]
         game_args += fabric.get("arguments", {}).get("game", [])
 
         version = dict(vanilla)
         version.update(
-            id=VERSION_ID,
+            id=pack["version_id"],
             type="modified",
             mainClass=fabric["mainClass"],
             libraries=fabric["libraries"] + vanilla["libraries"],
@@ -145,28 +197,24 @@ class Updater:
         version.pop("inheritsFrom", None)
         return version
 
-    def install_version(self, manifest: dict) -> None:
-        state = load_json(self.state_file, {})
-        self.game_dir.mkdir(parents=True, exist_ok=True)
-        ensure_server(self.game_dir / "servers.dat", "MineSerc", manifest["server"])
+    def install_version(self, pack: dict, game_dir: Path) -> None:
+        state_file = game_dir / "launcher_state.json"
+        state = load_json(state_file, {})
+        game_dir.mkdir(parents=True, exist_ok=True)
+        ensure_server(game_dir / "servers.dat", pack["server_name"], pack["server"])
 
-        key = f"v4|{manifest['minecraft']}|{manifest['fabric_loader']}|{self.game_dir}"
-        json_path = self.mc_dir / "versions" / VERSION_ID / f"{VERSION_ID}.json"
+        version_id = pack["version_id"]
+        key = f"v5|{version_id}|{pack['minecraft']}|{pack['fabric_loader']}|{game_dir}"
+        json_path = self.mc_dir / "versions" / version_id / f"{version_id}.json"
         if state.get("version_key") == key and json_path.exists():
             return
-        version = self.build_version(manifest["minecraft"], manifest["fabric_loader"])
-        save_json(json_path, version)
-
-        options = self.game_dir / "options.txt"
-        if not options.exists():
-            options.write_text("lang:ru_ru\n", "utf-8")
-
+        save_json(json_path, self.build_version(pack, game_dir))
         state["version_key"] = key
-        save_json(self.state_file, state)
+        save_json(state_file, state)
 
-    def setup_skin_loader(self) -> None:
+    def setup_skin_loader(self, game_dir: Path) -> None:
         # Наше облако первым в списке CustomSkinLoader, остальные его настройки не трогаем
-        path = self.game_dir / "CustomSkinLoader" / "CustomSkinLoader.json"
+        path = game_dir / "CustomSkinLoader" / "CustomSkinLoader.json"
         config = load_json(path, {})
         ours = {"name": APP_NAME, "type": "CustomSkinAPI", "root": f"{CLOUD_URL}/skins/"}
         loadlist = config.get("loadlist") or []
@@ -204,52 +252,97 @@ class Updater:
         save_json(self.state_file, state)
         return f"{message} для {nick}. Другие увидят его после перезахода на сервер."
 
-    def sync_files(self, items: list, folder: str, what: str) -> None:
-        """Скачивает файлы из облака в game_dir/<folder> (одноимённая папка в облаке)."""
-        target = self.game_dir / folder
-        target.mkdir(parents=True, exist_ok=True)
-        state = load_json(self.state_file, {})
-        wanted = {m["file"] for m in items}
+    def download(self, url_path: str, dest: Path, expected_sha1: str) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        with cloud.get(f"{CLOUD_URL}/{requests.utils.quote(url_path)}", stream=True, timeout=30) as r:
+            r.raise_for_status()
+            with tmp.open("wb") as f:
+                for chunk in r.iter_content(1 << 16):
+                    f.write(chunk)
+        if sha1(tmp) != expected_sha1:
+            tmp.unlink()
+            raise RuntimeError(f"Файл {dest.name} скачался с ошибкой, попробуй ещё раз.")
+        tmp.replace(dest)
 
-        # Убираем только файлы, которые раньше ставил лаунчер; свои файлы игрока не трогаем
-        for name in state.get(f"managed_{folder}", []):
-            if name not in wanted and (target / name).exists():
-                self.status(f"Удаляю старый {what} {name}")
-                (target / name).unlink()
+    def sync_pack(self, pack: dict, game_dir: Path) -> None:
+        """Приводит файлы сборки в папке игры к облаку.
 
-        for i, m in enumerate(items, 1):
-            self.progress(i / max(len(items), 1))
-            path = target / m["file"]
-            if path.exists() and sha1(path) == m["sha1"]:
+        Файл качается, если его нет или в облаке вышла новая версия; правки игрока
+        в конфигах живут до следующего обновления этого файла в облаке. Файлы из
+        "once" (например, options.txt) кладутся только если их ещё нет.
+        """
+        name = pack["name"]
+        state_file = game_dir / "launcher_state.json"
+        state = load_json(state_file, {})
+        recorded = state.get("files", {})
+        # Пути, которые ставил лаунчер, в том числе в старом формате состояния
+        managed = (set(recorded) | {f"mods/{n}" for n in state.get("managed_mods", [])}
+                   | {f"resourcepacks/{n}" for n in state.get("managed_resourcepacks", [])})
+        once = set(pack["once"])
+        wanted = {f["path"] for f in pack["files"]}
+
+        # Убираем только то, что раньше ставил лаунчер; свои файлы игрока не трогаем
+        for rel in sorted(managed - wanted):
+            path = inside(game_dir, rel)
+            if path and path.exists():
+                self.status(f"{name}: удаляю {path.name}")
+                path.unlink()
+            recorded.pop(rel, None)
+
+        self.status(f"{name}: проверяю файлы…")
+        todo = []
+        for f in pack["files"]:
+            rel, path = f["path"], inside(game_dir, f["path"])
+            if path is None:
                 continue
-            self.status(f"Скачиваю {what} {m['file']} ({i}/{len(items)})")
-            tmp = path.with_name(path.name + ".part")
-            with cloud.get(f"{CLOUD_URL}/{folder}/{requests.utils.quote(m['file'])}", stream=True, timeout=30) as r:
-                r.raise_for_status()
-                with tmp.open("wb") as f:
-                    for chunk in r.iter_content(1 << 16):
-                        f.write(chunk)
-            if sha1(tmp) != m["sha1"]:
-                tmp.unlink()
-                raise RuntimeError(f"Файл {m['file']} скачался с ошибкой, попробуй ещё раз.")
-            tmp.replace(path)
+            if rel in once:
+                if not path.exists():
+                    todo.append(f)
+            elif recorded.get(rel) == f["sha1"] and path.exists():
+                continue
+            elif path.exists() and path.stat().st_size == f["size"] and sha1(path) == f["sha1"]:
+                recorded[rel] = f["sha1"]
+            else:
+                todo.append(f)
 
-        state[f"managed_{folder}"] = sorted(wanted)
-        save_json(self.state_file, state)
+        total = sum(f["size"] for f in todo) or 1
+        done = 0
+        for i, f in enumerate(todo, 1):
+            self.status(f"{name}: скачиваю {Path(f['path']).name} ({i}/{len(todo)}, {done / 2**20:.0f} из {total / 2**20:.0f} МБ)")
+            self.download(pack["base"] + f["path"], inside(game_dir, f["path"]), f["sha1"])
+            if f["path"] not in once:
+                recorded[f["path"]] = f["sha1"]
+            done += f["size"]
+            self.progress(done / total)
+            if i % 100 == 0:
+                # Чтобы после обрыва связи продолжить с того же места
+                state["files"] = recorded
+                save_json(state_file, state)
 
-    def enable_packs(self, packs: list) -> None:
+        state["files"] = recorded
+        state.pop("managed_mods", None)
+        state.pop("managed_resourcepacks", None)
+        save_json(state_file, state)
+
+        options = game_dir / "options.txt"
+        if not options.exists():
+            options.write_text("lang:ru_ru\n", "utf-8")
+
+    def enable_packs(self, game_dir: Path, names: list) -> None:
         """Включает ресурспаки сервера в options.txt в нужном порядке.
 
         Делается только когда набор паков с облака поменялся, чтобы игрок
         мог сам выключить пак и лаунчер не включал его обратно каждый раз.
         """
-        state = load_json(self.state_file, {})
-        ours = [f"file/{p['file']}" for p in packs]
+        state_file = game_dir / "launcher_state.json"
+        state = load_json(state_file, {})
+        ours = [f"file/{n}" for n in names]
         if state.get("enabled_packs") == ours:
             return
         previous = set(state.get("enabled_packs", [])) | set(ours)
 
-        options = self.game_dir / "options.txt"
+        options = game_dir / "options.txt"
         lines = options.read_text("utf-8").splitlines() if options.exists() else []
         current = ["vanilla", "fabric"]
         for line in lines:
@@ -264,7 +357,7 @@ class Updater:
         options.write_text("\n".join(lines) + "\n", "utf-8")
 
         state["enabled_packs"] = ours
-        save_json(self.state_file, state)
+        save_json(state_file, state)
 
     def open_tlauncher(self) -> bool:
         exe = self.mc_dir / "TLauncher.exe"
@@ -273,18 +366,30 @@ class Updater:
             return True
         return False
 
-    def run(self, open_tl: bool = True) -> str:
-        manifest = self.fetch_manifest()
-        self.install_version(manifest)
-        self.setup_skin_loader()
-        self.sync_files(manifest["mods"], "mods", "мод")
-        packs = manifest.get("resourcepacks", [])
-        self.sync_files(packs, "resourcepacks", "ресурспак")
-        self.enable_packs(packs)
+    def run(self, open_tl: bool = True, pack_ids: list = None) -> str:
+        ids = pack_ids or selected_packs()
+        chosen = [e for e in self.fetch_packs() if e["id"] in ids]
+        if not chosen:
+            raise RuntimeError("Не выбрано ни одной сборки. Нажми «Сборки…» и отметь нужные.")
+
+        versions, notes = [], []
+        for entry in chosen:
+            self.status(f"{entry['name']}: получаю список файлов…")
+            pack = normalize_pack(entry, self.fetch_json(entry["manifest"]))
+            game_dir = self.mc_dir / pack["game_dir"]
+            self.install_version(pack, game_dir)
+            self.setup_skin_loader(game_dir)
+            self.sync_pack(pack, game_dir)
+            if pack["enable"]:
+                self.enable_packs(game_dir, pack["enable"])
+            versions.append(pack["version_id"])
+            if pack.get("note"):
+                notes.append(pack["note"])
+
         self.progress(1)
-        if open_tl and self.open_tlauncher():
-            return f"Готово! В TLauncher выбери версию «{VERSION_ID}» и нажми «Войти в игру»."
-        return f"Готово! Открой TLauncher, выбери версию «{VERSION_ID}» и нажми «Войти в игру»."
+        which = f"версию «{versions[0]}»" if len(versions) == 1 else "нужную версию: «" + "» или «".join(versions) + "»"
+        where = "В TLauncher" if open_tl and self.open_tlauncher() else "Открой TLauncher и"
+        return f"Готово! {where} выбери {which} и нажми «Войти в игру».{' ' + ' '.join(notes) if notes else ''}"
 
 
 def run_gui() -> None:
@@ -308,11 +413,8 @@ def run_gui() -> None:
     actions.columnconfigure(0, weight=1)
     go = ttk.Button(actions, text="Обновить и открыть TLauncher")
     go.grid(column=0, row=0, sticky="we")
-    # Заготовка: позже здесь будет выбор сборок для установки и обновления
-    packs = ttk.Button(actions, text="Сборки…", command=lambda: messagebox.showinfo(
-        APP_NAME, f"Сейчас доступна одна сборка: «{VERSION_ID}» (Fabric).\n\n"
-                  "Выбор других сборок для установки и обновления появится здесь позже."))
-    packs.grid(column=1, row=0, padx=(6, 0))
+    packs_btn = ttk.Button(actions, text="Сборки…")
+    packs_btn.grid(column=1, row=0, padx=(6, 0))
 
     # Скин: ник как в TLauncher, тип модели и выбор PNG
     skin = ttk.LabelFrame(frm, text="Скин на сервере", padding=8)
@@ -351,6 +453,54 @@ def run_gui() -> None:
         go.state(["disabled"])
         threading.Thread(target=worker, daemon=True).start()
 
+    def show_packs(entries):
+        # Окно выбора сборок: отмеченные устанавливаются и обновляются кнопкой «Обновить»
+        win = tk.Toplevel(root)
+        win.title("Сборки")
+        win.resizable(False, False)
+        win.transient(root)
+        win.grab_set()
+        box = ttk.Frame(win, padding=16)
+        box.grid()
+        ttk.Label(box, text="Отметь сборки, которые нужно установить и обновлять:").grid(column=0, row=0, sticky="w", pady=(0, 8))
+        chosen = set(selected_packs())
+        checks = {}
+        for i, e in enumerate(entries):
+            checks[e["id"]] = tk.BooleanVar(value=e["id"] in chosen)
+            size = f" — {e['size'] / 2**20:.0f} МБ" if e.get("size") else ""
+            ttk.Checkbutton(box, text=e["name"] + size, variable=checks[e["id"]]).grid(column=0, row=1 + 2 * i, sticky="w")
+            if e.get("description"):
+                ttk.Label(box, text=e["description"], foreground="gray", wraplength=320).grid(
+                    column=0, row=2 + 2 * i, sticky="w", padx=(22, 0), pady=(0, 6))
+
+        def save():
+            ids = [pid for pid, var in checks.items() if var.get()]
+            if not ids:
+                messagebox.showwarning(APP_NAME, "Отметь хотя бы одну сборку.", parent=win)
+                return
+            save_selected_packs(ids)
+            names = ", ".join(e["name"] for e in entries if e["id"] in ids)
+            status_var.set(f"Выбрано: {names}. Нажми «Обновить и открыть TLauncher».")
+            win.destroy()
+
+        ttk.Button(box, text="Сохранить", command=save).grid(column=0, row=1 + 2 * len(entries), sticky="e", pady=(10, 0))
+
+    def packs_worker():
+        upd = Updater(lambda s: ui(status_var.set, s), lambda v: None)
+        try:
+            entries = upd.fetch_packs()
+            ui(status_var.set, "Выбери сборки")
+            ui(show_packs, entries)
+        except Exception as e:
+            traceback.print_exc()
+            ui(messagebox.showerror, APP_NAME, str(e))
+            ui(status_var.set, "Не удалось получить список сборок")
+        ui(packs_btn.state, ["!disabled"])
+
+    def on_packs():
+        packs_btn.state(["disabled"])
+        threading.Thread(target=packs_worker, daemon=True).start()
+
     def skin_worker(nick, png, slim):
         upd = Updater(lambda s: ui(status_var.set, s), lambda v: None)
         try:
@@ -372,15 +522,17 @@ def run_gui() -> None:
             threading.Thread(target=skin_worker, args=(nick, Path(png), slim_var.get()), daemon=True).start()
 
     go.configure(command=on_go)
+    packs_btn.configure(command=on_packs)
     pick.configure(command=on_pick)
     root.mainloop()
 
 
 if __name__ == "__main__":
-    # Отладка: launcher.py --cli [--no-open]  |  launcher.py --skin <ник> <файл.png> [--slim]
+    # Отладка: launcher.py --cli [--no-open] [--packs id1,id2]  |  launcher.py --skin <ник> <файл.png> [--slim]
     if len(sys.argv) >= 4 and sys.argv[1] == "--skin":
         print(Updater(print, lambda v: None).upload_skin(sys.argv[2], Path(sys.argv[3]), "--slim" in sys.argv))
     elif len(sys.argv) >= 2 and sys.argv[1] == "--cli":
-        print(Updater(print, lambda v: None).run(open_tl="--no-open" not in sys.argv))
+        ids = sys.argv[sys.argv.index("--packs") + 1].split(",") if "--packs" in sys.argv else None
+        print(Updater(print, lambda v: None).run(open_tl="--no-open" not in sys.argv, pack_ids=ids))
     else:
         run_gui()
