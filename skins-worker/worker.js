@@ -14,13 +14,21 @@
  * Первый, кто загрузил скин на ник, задаёт его токен; дальше менять скин этого ника
  * можно только с тем же токеном. Сбросить ник: удалить owners/<ник>.json в репозитории.
  *
+ *   POST /report   тело — JSON {kind, title, signature, version, build, os, text}: отчёт об
+ *                  ошибке лаунчера. Становится задачей (issue) в закрытом репозитории отчётов;
+ *                  повтор той же ошибки (та же signature) — комментарием к открытой задаче.
+ *
  * Настройки Worker:
  *   SKINS_REPO     переменная, например TejkaFan/MineForFriends-skins
- *   GITHUB_TOKEN   секрет: fine-grained токен с правом Contents: Read and write
- *                  только на репозиторий скинов
+ *   REPORTS_REPO   переменная, по умолчанию TejkaFan/MineForFriends-reports
+ *   GITHUB_TOKEN   секрет: fine-grained токен с правами Contents: Read and write на репозиторий
+ *                  скинов и Issues: Read and write на репозиторий отчётов
  */
 const NICK_RE = /^[A-Za-z0-9_]{3,16}$/;
 const MAX_SKIN = 1 << 20;
+const MAX_REPORT = 64 * 1024;
+const DEFAULT_REPORTS_REPO = "TejkaFan/MineForFriends-reports";
+const REPORT_KINDS = {crash: "сбой", error: "ошибка", js: "ошибка интерфейса", manual: "отчёт игрока"};
 const BRANCH = "main";
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -33,6 +41,14 @@ export default {
       } catch (e) {
         console.error(e);
         return reply(502, "GitHub сейчас недоступен, попробуй позже");
+      }
+    }
+    if (request.method === "POST" && pathname === "/report") {
+      try {
+        return await report(request, env);
+      } catch (e) {
+        console.error(e);
+        return reply(502, "Не удалось сохранить отчёт, GitHub недоступен");
       }
     }
     if (request.method === "GET" && pathname === "/") return reply(200, "MineForFriends: загрузка скинов работает");
@@ -75,8 +91,8 @@ function fromBase64Text(b64) {
   return new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0)));
 }
 
-async function github(env, method, path, body) {
-  const r = await fetch(`https://api.github.com/repos/${env.SKINS_REPO}/${path}`, {
+async function github(env, method, path, body, repo = env.SKINS_REPO) {
+  const r = await fetch(`https://api.github.com/repos/${repo}/${path}`, {
     method,
     headers: {
       "Authorization": `Bearer ${env.GITHUB_TOKEN}`,
@@ -146,4 +162,39 @@ async function upload(request, env) {
     }
   }
   return reply(503, "Сервер скинов занят, попробуй ещё раз");
+}
+
+function clean(value, max) {
+  return String(value ?? "").replace(/[\r\n\t]+/g, " ").trim().slice(0, max);
+}
+
+async function report(request, env) {
+  const raw = await request.text();
+  if (raw.length > MAX_REPORT) return reply(413, "Отчёт слишком большой");
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return reply(400, "Неверный отчёт");
+  }
+  const signature = String(data?.signature || "");
+  const text = String(data?.text || "").slice(0, MAX_REPORT);
+  if (!/^[0-9a-f]{12}$/.test(signature) || !text) return reply(400, "Неверный отчёт");
+
+  const kind = REPORT_KINDS[data.kind] || REPORT_KINDS.error;
+  const title = `[${signature}] ${kind}: ${clean(data.title, 100) || "без описания"}`;
+  const meta = `**Версия:** ${clean(data.version, 30)} (сборка ${clean(data.build, 20)}) · **Windows:** ${clean(data.os, 60)}`;
+  // Пять обратных кавычек: в логе могут встретиться тройные
+  const body = `${meta}\n\n\`\`\`\`\`text\n${text}\n\`\`\`\`\`\n`;
+
+  // Та же ошибка уже открыта — дописываем комментарием, чтобы не плодить задачи
+  const repo = env.REPORTS_REPO || DEFAULT_REPORTS_REPO;
+  const open = await github(env, "GET", "issues?state=open&per_page=100", null, repo) || [];
+  const same = open.find(i => !i.pull_request && i.title.startsWith(`[${signature}]`));
+  if (same) {
+    await github(env, "POST", `issues/${same.number}/comments`, {body}, repo);
+  } else {
+    await github(env, "POST", "issues", {title, body}, repo);
+  }
+  return reply(200, "Отчёт отправлен автору");
 }

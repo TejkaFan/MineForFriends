@@ -39,6 +39,23 @@ GitHub → аватар → **Settings** → **Developer settings** → **Person
 
 Этот адрес (он не секретный) вписывается в `SKINS_UPLOAD` в `launcher.py` с `/upload` на конце.
 
+### 4. Отчёты об ошибках
+
+Тот же Worker принимает отчёты о сбоях лаунчера (`POST /report`) и складывает их задачами (Issues)
+в **закрытый** репозиторий — там пути, ники и логи игроков, поэтому он не должен быть публичным.
+
+1. На GitHub: **New repository** → имя `MineForFriends-reports`, **Private**, галочка **Add a README file** → **Create repository**.
+2. Токен из шага 2: GitHub → **Settings** → **Developer settings** → **Fine-grained tokens** → токен `MineForFriends skins` → **Edit**:
+   - Repository access: добавить `MineForFriends-reports` (к `MineForFriends-skins`)
+   - Permissions → Repository permissions → **Issues: Read and write**
+   
+   → **Update**. Сам токен не меняется, в Worker ничего заменять не нужно.
+3. В Worker: **Edit code** → вставить свежий `worker.js` → **Deploy**. Переменная `REPORTS_REPO`
+   не обязательна: по умолчанию `TejkaFan/MineForFriends-reports`.
+
+Отчёты видны во вкладке **Issues** репозитория. Одна и та же ошибка не плодит задачи: повторы
+приходят комментариями к открытой задаче. Закрыл задачу — следующий такой же сбой откроет новую.
+
 ## Обслуживание
 
 - **Сбросить ник** (игрок потерял токен — переустановил Windows, сменил ПК): удалить в репозитории файл `owners/<ник в нижнем регистре>.json`.
