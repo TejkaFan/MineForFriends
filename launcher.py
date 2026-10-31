@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.parse
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -42,7 +43,7 @@ import server_host
 import share
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.9.6"
+APP_VERSION = "0.9.7"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -91,7 +92,8 @@ RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 # К облаку ходим напрямую: системный прокси (VPN-клиенты) не видит сеть Radmin
 cloud = requests.Session()
 cloud.trust_env = False
-web = requests.Session()
+# Сайты загрузчиков, модов и обновлений: при обрыве связи — в обход через облако хоста
+web = relay.protect(requests.Session())
 
 
 def migrate_settings() -> None:
@@ -1752,10 +1754,19 @@ def _guarded(method):
         except RuntimeError as e:
             print(f"{method.__name__}: {e}")
             raise
+        except requests.RequestException as e:
+            # Сеть, а не поломка лаунчера: объясняем, что делать
+            reports.crash(e)
+            host = urllib.parse.urlsplit(e.request.url).hostname if e.request is not None else None
+            where = f" с {host}" if host else ""
+            raise RuntimeError(f"Не получилось скачать{where}: связь оборвалась.\n\n"
+                               "Попробуй ещё раз. Если повторяется — провайдер мешает этому сайту: "
+                               "лаунчер сам пойдёт в обход через облако хоста, когда облако запущено "
+                               "и ты в сети Radmin.") from None
         except Exception as e:
             reports.crash(e)
             raise RuntimeError(f"В лаунчере что-то сломалось ({type(e).__name__}: {e}).\n\n"
-                               "Отчёт об ошибке уже отправлен автору.") from None
+                               "Отчёт об ошибке отправляется автору.") from None
     return call
 
 

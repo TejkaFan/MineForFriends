@@ -21,6 +21,8 @@ from pathlib import Path, PurePosixPath
 
 import requests
 
+import relay
+
 LOADERS = ("vanilla", "fabric", "quilt", "forge", "neoforge")
 LOADER_NAMES = {"vanilla": "Без модов", "fabric": "Fabric", "quilt": "Quilt", "forge": "Forge", "neoforge": "NeoForge"}
 
@@ -50,7 +52,7 @@ BUILTIN = {"minecraft", "java", "fabricloader", "fabric-loader", "quilt_loader",
            "forge", "neoforge", "fml", "javafml", "lowcodefml", "mixinextras"}
 MC_TOKEN = re.compile(r"(?<![\d.])(1\.\d{1,2}(?:\.\d{1,2})?|[2-9]\d\.\d{1,2}(?:\.\d{1,2})?)(?![\d.])")
 
-web = requests.Session()
+web = relay.protect(requests.Session())
 web.headers["User-Agent"] = "MineForFriends-launcher (github.com/TejkaFan)"
 
 

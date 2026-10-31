@@ -10,6 +10,8 @@
 
 Пересылка в Worker (для друзей, у которых провайдер обрывает соединение с Cloudflare):
     POST /relay/upload | /relay/cape | /relay/report | /relay/recipe, GET /relay/recipes
+И в сайты, откуда лаунчер качает загрузчики, моды и обновления (только из FETCH_HOSTS):
+    GET|POST /relay-url?url=<адрес>   переадресации не выполняются, а возвращаются лаунчеру
 Только из сети Radmin (26.x.x.x) и с этого компьютера.
 Первый, кто загрузил скин на ник, задаёт его токен; дальше менять скин этого ника можно
 только с тем же токеном. Сбросить ник: удалить его строку из skin_tokens.json.
@@ -18,10 +20,12 @@ import functools
 import hashlib
 import json
 import re
+import shutil
 import socket
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,6 +47,25 @@ WORKER = "https://mineforfriends-skins.inkiandmelon.workers.dev"
 RELAY_ROUTES = {("POST", "/upload"), ("POST", "/cape"), ("POST", "/report"), ("POST", "/recipe"), ("GET", "/recipes")}
 RELAY_HEADERS = ("X-Nick", "X-Token", "X-Model", "Content-Type")
 RELAY_MAX = 8 << 20
+RELAY_REPLY_HEADERS = ("Content-Type", "Location", "Content-Disposition", "ETag", "Last-Modified")
+# Сайты загрузчиков, модов и обновлений лаунчера; переадресации CurseForge ведут на forgecdn
+FETCH_HOSTS = {
+    "meta.fabricmc.net", "maven.fabricmc.net", "meta.quiltmc.org", "maven.quiltmc.org",
+    "files.minecraftforge.net", "maven.minecraftforge.net", "maven.neoforged.net",
+    "api.modrinth.com", "cdn.modrinth.com", "www.curseforge.com", "edge.forgecdn.net", "mediafilez.forgecdn.net",
+    "piston-meta.mojang.com", "piston-data.mojang.com", "launchermeta.mojang.com", "libraries.minecraft.net",
+    "api.github.com", "github.com", "raw.githubusercontent.com", "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+}
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    # Переадресацию выполняет лаунчер: так он снова проверит, разрешён ли новый сайт
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+relay_opener = urllib.request.build_opener(NoRedirect)
 
 
 def png_size(data: bytes):
@@ -105,13 +128,27 @@ class Handler(SimpleHTTPRequestHandler):
     # ---- Пересылка в Worker для друзей, у которых провайдер обрывает соединение с Cloudflare
 
     def relay(self, method: str) -> bool:
-        route = self.path.split("?", 1)[0]
+        route, _, query = self.path.partition("?")
+        if route == "/relay-url":
+            url = urllib.parse.parse_qs(query).get("url", [""])[0]
+            parts = urllib.parse.urlsplit(url)
+            if parts.scheme != "https" or parts.hostname not in FETCH_HOSTS:
+                self.reply(404, "Этот сайт облако не пересылает")
+                return True
+            headers = {k: self.headers[k] for k in ("Accept", "Content-Type") if self.headers.get(k)}
+            headers["User-Agent"] = self.headers.get("User-Agent") or "MineForFriends-cloud-relay"
+            return self.forward(method, url, headers, parts.hostname)
         if not route.startswith("/relay/"):
             return False
         target = route[len("/relay"):]
         if (method, target) not in RELAY_ROUTES:
             self.reply(404, "Нет такого адреса")
             return True
+        headers = {k: self.headers[k] for k in RELAY_HEADERS if self.headers.get(k)}
+        headers["User-Agent"] = "MineForFriends-cloud-relay"
+        return self.forward(method, WORKER + target, headers, "сервера скинов")
+
+    def forward(self, method: str, url: str, headers: dict, site: str) -> bool:
         # Только своим: сеть Radmin и этот компьютер. Иначе облако стало бы открытым прокси
         if not (self.client_address[0].startswith("26.") or self.client_address[0] == "127.0.0.1"):
             self.reply(403, "Пересылка только для друзей по Radmin")
@@ -121,24 +158,30 @@ class Handler(SimpleHTTPRequestHandler):
             self.reply(413, "Слишком большой запрос")
             return True
         body = self.rfile.read(length) if length else None
-        headers = {k: self.headers[k] for k in RELAY_HEADERS if self.headers.get(k)}
-        headers["User-Agent"] = "MineForFriends-cloud-relay"
-        request = urllib.request.Request(WORKER + target, data=body, headers=headers, method=method)
+        request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=120) as r:
-                status, data, kind = r.status, r.read(), r.headers.get("Content-Type", "application/json")
+            r = relay_opener.open(request, timeout=120)
         except urllib.error.HTTPError as e:
-            status, data, kind = e.code, e.read(), e.headers.get("Content-Type", "application/json")
+            r = e  # 3xx (переадресацию отдаём лаунчеру), 4xx, 5xx — ответ сайта как есть
         except OSError as e:
-            self.reply(502, f"Облако хоста не достучалось до сервера скинов: {e}")
+            self.reply(502, f"Облако хоста не достучалось до {site}: {e}")
             return True
-        self.send_response(status)
-        self.send_header("Content-Type", kind)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("X-MFF-Relay", "1")
-        self.end_headers()
-        self.wfile.write(data)
-        self.log_message("пересылка %s %s -> %s", method, target, status)
+        with r:
+            size = r.headers.get("Content-Length")
+            data = None if size else r.read()
+            self.send_response(r.status)
+            for k in RELAY_REPLY_HEADERS:
+                if r.headers.get(k):
+                    self.send_header(k, r.headers[k])
+            self.send_header("Content-Length", size or str(len(data)))
+            self.send_header("X-MFF-Relay", "1")
+            self.end_headers()
+            if data is None:
+                # Большие файлы (моды, загрузчики) передаём кусками, не держа целиком в памяти
+                shutil.copyfileobj(r, self.wfile, 1 << 16)
+            else:
+                self.wfile.write(data)
+        self.log_message("пересылка %s %s -> %s", method, url.split("?")[0], r.status)
         return True
 
     def do_GET(self):
