@@ -75,6 +75,8 @@ function go(page) {
   // Списки могли поменяться на соседних вкладках
   if (page === "custom") loadProfiles();
   if (page === "server") loadServerTab();
+  // 3D-модель рисуется только на своей вкладке, чтобы не грузить видеокарту зря
+  if (skin.viewer) skin.viewer.renderPaused = page !== "skin";
 }
 
 function setStatus(scope, text) {
@@ -113,11 +115,6 @@ function drawFace(canvas, b64) {
     ctx.drawImage(img, 40, 8, 8, 8, 0, 0, 8, 8);
   };
   img.src = "data:image/png;base64," + b64;
-}
-
-function showSkin(b64) {
-  drawFace($("#chip-head"), b64);
-  drawFace($("#skin-face"), b64);
 }
 
 function setNick(nick) {
@@ -159,9 +156,10 @@ function renderServers(d) {
 
 function updatePlay() {
   const chosen = state.packs.filter(p => state.selected.includes(p.id)).map(p => `«${p.name}»`);
-  $("#play-btn").disabled = !state.ready || !state.cloud || !chosen.length || state.busy;
+  $("#play-btn").disabled = !state.ready || !state.cloud || !chosen.length || state.busy || !state.tlauncher;
   if (!state.ready || state.busy) return;
-  $("#play-hint").textContent = !state.cloud ? "Нет связи с облаком"
+  $("#play-hint").textContent = !state.tlauncher ? "Сначала установи TLauncher"
+    : !state.cloud ? "Нет связи с облаком"
     : chosen.length ? `Обновит ${chosen.join(", ")} и откроет TLauncher`
     : "Отметь хотя бы одну сборку";
 }
@@ -189,6 +187,19 @@ async function play() {
     updatePlay();
     showError(errText(e));
   }
+}
+
+function showTlauncher(installed) {
+  state.tlauncher = installed;
+  $("#tl-notice").classList.toggle("hidden", installed);
+  updatePlay();
+}
+
+function installTlauncher() {
+  api().install_tlauncher();
+  $("#tl-text").textContent = "Открыл сайт TLauncher в браузере: нажми «Download TL» (Скачать), запусти скачанный " +
+    "установщик и пройди установку. Как только TLauncher установится, эта плашка исчезнет сама.";
+  $("#tl-install").lastChild.textContent = "Открыть сайт ещё раз";
 }
 
 // ---------- Свои сборки ----------
@@ -414,26 +425,114 @@ async function serverAction(act, s) {
 
 // ---------- Скин ----------
 
+// source: "server" — скин из облака, "local" — последняя загруженная копия, "picked" — выбран, но не загружен
+const skin = {viewer: null, b64: null, model: "default", source: null, animate: true};
+
+function skinViewer() {
+  if (!skin.viewer && window.skinview3d) {
+    try {
+      const v = new skinview3d.SkinViewer({canvas: $("#skin-3d"), width: 300, height: 380});
+      v.autoRotate = true;
+      v.autoRotateSpeed = 0.6;
+      v.animation = new skinview3d.WalkingAnimation();
+      v.animation.speed = 0.6;
+      v.controls.enableZoom = false;
+      v.renderPaused = !$("#page-skin").classList.contains("active");
+      skin.viewer = v;
+    } catch (e) {
+      console.warn("3D-предпросмотр недоступен", e); // без WebGL остаётся пиксельное лицо
+    }
+  }
+  return skin.viewer;
+}
+
+function renderSkin() {
+  const v = skinViewer();
+  const in3d = Boolean(v && skin.b64);
+  $("#skin-3d").classList.toggle("hidden", !in3d);
+  $("#skin-face").classList.toggle("hidden", in3d);
+  if (in3d) v.loadSkin("data:image/png;base64," + skin.b64, {model: skin.model});
+  else drawFace($("#skin-face"), skin.b64);
+}
+
+function setSkinTag(text, kind = "") {
+  $("#skin-tag").textContent = text;
+  $("#skin-tag").className = "skin-tag " + kind;
+}
+
+function setModel(model) {
+  skin.model = model;
+  $(`input[name=model][value=${model}]`).checked = true;
+}
+
+function showServerSkin(nick, b64, model) {
+  Object.assign(skin, {b64, source: "server"});
+  setModel(model);
+  setSkinTag(`Так ${nick} видят на сервере`, "server");
+  drawFace($("#chip-head"), b64);
+  renderSkin();
+}
+
+async function loadServerSkin() {
+  if (skin.source === "picked") return; // не перебиваем предпросмотр выбранного файла
+  const nick = $("#nick").value.trim();
+  setSkinTag("Проверяю скин на сервере…");
+  const res = await api().server_skin(nick);
+  if (skin.source === "picked") return;
+  if (res && res.found) return showServerSkin(nick, res.skin, res.model);
+  // Скина на сервере нет или облако недоступно — показываем последнюю загруженную копию
+  Object.assign(skin, {b64: state.info.skin, source: "local"});
+  setModel(state.info.skin_model);
+  setSkinTag(!res ? "Облако недоступно — показан последний загруженный скин"
+    : `На сервере у ${nick || "этого ника"} стандартный скин`);
+  renderSkin();
+}
+
+async function chooseSkin() {
+  try {
+    const res = await api().pick_skin();
+    if (!res) return;
+    Object.assign(skin, {b64: res.skin, source: "picked"});
+    setSkinTag(`Предпросмотр: ${res.name} — ещё не загружен`, "preview");
+    $("#skin-status").textContent = "";
+    $("#skin-upload").disabled = false;
+    renderSkin();
+  } catch (e) {
+    showError(errText(e));
+  }
+}
+
 async function uploadSkin() {
   const nick = $("#nick").value.trim();
   if (!nick) return showInfo("Нужен ник", "Впиши ник, под которым играешь в TLauncher.");
   const status = $("#skin-status");
-  $("#skin-pick").disabled = true;
+  $("#skin-upload").disabled = true;
   try {
-    const res = await api().upload_skin(nick, $("input[name=model]:checked").value === "slim");
-    if (res) {
-      status.className = "line";
-      status.textContent = res.message;
-      showSkin(res.skin);
-      setNick(nick);
-      $("#skin-file").textContent = "Этот скин сейчас на сервере";
-    }
+    const res = await api().upload_skin(nick, skin.model === "slim");
+    status.className = "line";
+    status.textContent = res.message;
+    state.info.skin = res.skin;
+    state.info.skin_model = skin.model;
+    setNick(nick);
+    showServerSkin(nick, res.skin, skin.model);
   } catch (e) {
     status.className = "line err";
     status.textContent = "Скин не загружен";
+    $("#skin-upload").disabled = false;
     showError(errText(e));
   }
-  $("#skin-pick").disabled = false;
+}
+
+function toggleSkinAnimation() {
+  skin.animate = !skin.animate;
+  const v = skinViewer();
+  if (v) {
+    v.autoRotate = skin.animate;
+    v.animation.paused = !skin.animate;
+  }
+  const btn = $("#skin-anim");
+  btn.title = skin.animate ? "Пауза" : "Анимация";
+  btn.innerHTML = icon(skin.animate ? "player-pause" : "player-play");
 }
 
 // ---------- О лаунчере ----------
@@ -488,6 +587,7 @@ window.app = {
     if (name === "status") data.scope === "boot" ? ($("#play-hint").textContent = data.text) : setStatus(data.scope, data.text);
     if (name === "progress") setProgress(data.scope, data.value);
     if (name === "servers") renderServers(data);
+    if (name === "tlauncher") showTlauncher(data.installed);
     if (name === "ready") {
       state.ready = true;
       updatePlay();
@@ -507,6 +607,7 @@ function bind() {
     if (card) toggleCard(card.dataset.id);
   };
   $("#play-btn").onclick = play;
+  $("#tl-install").onclick = installTlauncher;
   $("#pick-dir").onclick = () => pickPack("dir");
   $("#pick-zip").onclick = () => pickPack("zip");
   for (const r of $$("input[name=mc-mode]")) r.onchange = () => { setCustomBusy(false); refreshLoader(); };
@@ -523,7 +624,11 @@ function bind() {
     const b = e.target.closest("[data-act]");
     if (b) serverAction(b.dataset.act, state.servers[b.dataset.i]);
   };
-  $("#skin-pick").onclick = uploadSkin;
+  $("#skin-choose").onclick = chooseSkin;
+  $("#skin-upload").onclick = uploadSkin;
+  $("#skin-anim").onclick = toggleSkinAnimation;
+  for (const r of $$("input[name=model]")) r.onchange = () => { skin.model = r.value; renderSkin(); };
+  $("#nick").onchange = loadServerSkin;
   $("#skin-site").onclick = () => api().open_url(state.info.skins_site);
 }
 
@@ -536,11 +641,13 @@ async function start() {
   const info = await api().init();
   state.info = info;
   $("#version").textContent = "v" + info.version;
+  showTlauncher(info.tlauncher);
   $("#plan-loader").innerHTML = info.loaders.map(([id, name]) => `<option value="${id}">${esc(name)}</option>`).join("");
   $("#nick").value = info.nick;
   setNick(info.nick);
-  showSkin(info.skin);
-  if (info.skin) $("#skin-file").textContent = "Этот скин сейчас на сервере";
+  drawFace($("#chip-head"), info.skin);
+  $("#skin-anim").innerHTML = icon("player-pause");
+  loadServerSkin();
   loadProfiles();
   api().boot();
 }

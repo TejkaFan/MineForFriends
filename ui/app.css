@@ -78,6 +78,14 @@ header { display: flex; align-items: center; gap: 12px; padding: 16px 0 14px; }
 .line { font-size: 12px; }
 .line.err { color: var(--red); background: var(--red-bg); padding: 10px 12px; border-radius: 9px; }
 
+/* Плашка «TLauncher не установлен» */
+.notice { display: flex; align-items: center; gap: 14px; background: #2b2615; border: 1px solid #5c4d1f; border-radius: 11px;
+  padding: 12px 14px; }
+.notice .ico { color: var(--yellow); }
+.notice .ntitle { color: var(--white); font-weight: 600; }
+.notice .ntext { color: #cfc7a8; font-size: 12px; }
+.notice .btn { white-space: nowrap; }
+
 /* Карточки серверов */
 .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; overflow: auto; max-height: 300px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 11px; padding: 14px 15px 12px; display: flex;
@@ -175,8 +183,14 @@ input[type=radio], input[type=checkbox] { accent-color: var(--green-2); margin: 
 .empty { color: var(--dim); font-size: 12px; text-align: center; padding: 26px 10px; border: 1.5px dashed var(--line); border-radius: 9px; }
 
 /* Скин */
-.skin-preview { align-items: center; justify-content: center; gap: 16px; }
-#skin-face { width: 176px; height: 176px; image-rendering: pixelated; border-radius: 6px; }
+.skin-preview { align-items: center; justify-content: center; gap: 6px; position: relative; overflow: hidden; }
+#skin-3d { width: 300px; height: 380px; cursor: grab; }
+#skin-3d:active { cursor: grabbing; }
+#skin-face { width: 176px; height: 176px; image-rendering: pixelated; border-radius: 6px; margin: 100px 0; }
+.skin-tag { position: absolute; top: 14px; left: 14px; right: 14px; text-align: center; font-size: 12px; color: var(--muted); }
+.skin-tag.server { color: var(--ok); }
+.skin-tag.preview { color: var(--yellow); }
+.skin-tools { display: flex; align-items: center; gap: 8px; }
 .models { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .models label { display: flex; align-items: center; gap: 8px; background: var(--field); border: 1px solid var(--line);
   border-radius: 8px; padding: 9px 10px; cursor: pointer; font-size: 12px; }

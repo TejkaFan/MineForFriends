@@ -26,10 +26,11 @@ import requests
 import webview
 
 import custom_packs
+from cloud_server import MAX_SKIN, NICK_RE, png_size, valid_skin_size
 import server_host
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.5.1 beta"
+APP_VERSION = "0.5.5 beta"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -38,6 +39,8 @@ OLD_APP_ID = "MineSerc"
 CLOUD_URL = "http://26.199.180.115:8518"
 # Каталог скинов: там можно скачать PNG и выбрать его кнопкой «Выбрать скин»
 SKINS_SITE = "https://www.minecraftskins.com/"
+# Официальный сайт TLauncher: скачивать установщик программой сайт не даёт, только из браузера
+TLAUNCHER_SITE = "https://tlauncher.org/"
 REPO_URL = "https://github.com/TejkaFan/MineForFriends"
 APPDATA = Path(os.environ.get("APPDATA", Path.home()))
 TL_PROPERTIES = APPDATA / ".tlauncher" / "tlauncher-2.0.properties"
@@ -192,6 +195,14 @@ def minecraft_dir() -> Path:
     except OSError:
         pass
     return APPDATA / ".minecraft"
+
+
+def tlauncher_exe():
+    # Установщик TLauncher кладёт TLauncher.exe в папку игры; None — TLauncher не установлен
+    for folder in dict.fromkeys([minecraft_dir(), APPDATA / ".minecraft"]):
+        if (folder / "TLauncher.exe").exists():
+            return folder / "TLauncher.exe"
+    return None
 
 
 def selected_packs() -> list:
@@ -525,9 +536,9 @@ class Updater:
         save_json(state_file, state)
 
     def open_tlauncher(self) -> bool:
-        exe = self.mc_dir / "TLauncher.exe"
-        if exe.exists():
-            subprocess.Popen([str(exe)], cwd=str(self.mc_dir))
+        exe = tlauncher_exe()
+        if exe:
+            subprocess.Popen([str(exe)], cwd=str(exe.parent))
             return True
         return False
 
@@ -601,6 +612,8 @@ class Api:
         self._mc_dir = minecraft_dir()
         self._plan = {}
         self._booted = False
+        self._waiting_tl = False
+        self._skin_path = None  # выбранный, но ещё не загруженный скин
 
     def _emit(self, event: str, data=None) -> None:
         try:
@@ -630,10 +643,11 @@ class Api:
     def init(self) -> dict:
         state = load_json(self._mc_dir / DEFAULT_PACK["game_dir"] / "launcher_state.json", {})
         return {"nick": state.get("skin_nick") or tlauncher_nick(self._mc_dir), "skin": skin_b64(),
+                "skin_model": load_json(SETTINGS_FILE, {}).get("skin_model", "default"),
                 "loaders": [[l, custom_packs.LOADER_NAMES[l]] for l in custom_packs.LOADERS],
                 "version": APP_VERSION, "build": build_id(), "cloud_url": CLOUD_URL, "mc_dir": str(self._mc_dir),
                 "settings_dir": str(SETTINGS_FILE.parent), "repo": REPO_URL,
-                "eula_url": server_host.EULA_URL, "skins_site": SKINS_SITE}
+                "eula_url": server_host.EULA_URL, "skins_site": SKINS_SITE, "tlauncher": tlauncher_exe() is not None}
 
     def boot(self) -> None:
         # Интерфейс готов: проверяем версию лаунчера и запускаем индикатор серверов
@@ -641,10 +655,32 @@ class Api:
             return
         self._booted = True
         threading.Thread(target=self._watch_servers, daemon=True).start()
+        if not tlauncher_exe():
+            self._watch_tlauncher()  # игрок может поставить TLauncher и без нашей кнопки
         if self_update(self._status("boot")):
             self._window.destroy()
             return
         self._emit("ready")
+
+    def install_tlauncher(self) -> None:
+        # Открываем официальный сайт; установку заметит _wait_tlauncher
+        webbrowser.open(TLAUNCHER_SITE)
+        self._watch_tlauncher()
+
+    def _watch_tlauncher(self) -> None:
+        if not self._waiting_tl:
+            self._waiting_tl = True
+            threading.Thread(target=self._wait_tlauncher, daemon=True).start()
+
+    def _wait_tlauncher(self) -> None:
+        deadline = time.time() + 60 * 60
+        while time.time() < deadline and not tlauncher_exe():
+            time.sleep(3)
+        self._waiting_tl = False
+        if tlauncher_exe():
+            # Установщик мог выбрать другую папку игры
+            self._mc_dir = minecraft_dir()
+            self._emit("tlauncher", {"installed": True})
 
     def minimize(self) -> None:
         self._window.minimize()
@@ -831,15 +867,51 @@ class Api:
 
     # ---- Скин
 
-    def upload_skin(self, nick: str, slim: bool):
+    def pick_skin(self):
+        # Только выбор и проверка файла: игрок сначала смотрит предпросмотр, потом загружает
         png = self._pick(webview.FileDialog.OPEN, ("Скин PNG (*.png)",))
         if not png:
             return None
-        message = Updater(self._status("skin"), lambda v: None).upload_skin(nick, Path(png), slim)
-        # Копия для аватарки в шапке лаунчера
+        data = Path(png).read_bytes()
+        size = png_size(data)
+        if not size or not valid_skin_size(*size):
+            raise RuntimeError("Это не похоже на скин: нужен PNG 64×64 (или старый 64×32, или HD со стороной, кратной 64).")
+        if len(data) > MAX_SKIN:
+            raise RuntimeError("Файл скина больше 1 МБ.")
+        self._skin_path = Path(png)
+        return {"skin": base64.b64encode(data).decode(), "name": self._skin_path.name}
+
+    def upload_skin(self, nick: str, slim: bool) -> dict:
+        if not self._skin_path:
+            raise RuntimeError("Сначала выбери PNG со скином.")
+        message = Updater(self._status("skin"), lambda v: None).upload_skin(nick, self._skin_path, slim)
+        # Копия для аватарки в шапке и предпросмотра без облака
         SKIN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(png, SKIN_FILE)
+        shutil.copyfile(self._skin_path, SKIN_FILE)
+        settings = load_json(SETTINGS_FILE, {})
+        settings["skin_model"] = "slim" if slim else "default"
+        save_json(SETTINGS_FILE, settings)
+        self._skin_path = None
         return {"message": message, "skin": skin_b64()}
+
+    def server_skin(self, nick: str):
+        """Скин ника в облаке — так игрока видят другие.
+
+        {"found": True, "skin", "model"}, {"found": False} — скина нет, None — облако недоступно.
+        """
+        if not NICK_RE.match(nick or ""):
+            return {"found": False}
+        try:
+            r = cloud.get(f"{CLOUD_URL}/skins/{nick}.json", timeout=5)
+            if r.status_code == 404:
+                return {"found": False}
+            r.raise_for_status()
+            model, texture = next(iter(r.json()["skins"].items()))
+            png = cloud.get(f"{CLOUD_URL}/skins/textures/{texture}", timeout=8)
+            png.raise_for_status()
+        except (requests.RequestException, ValueError, KeyError, StopIteration):
+            return None
+        return {"found": True, "skin": base64.b64encode(png.content).decode(), "model": model}
 
 
 def run_gui() -> None:

@@ -34,6 +34,14 @@
 
     <!-- Наши серверы -->
     <section class="page active" id="page-play">
+      <div class="notice hidden" id="tl-notice">
+        <span class="ico" data-icon="alert-triangle"></span>
+        <div class="grow">
+          <div class="ntitle">TLauncher не установлен</div>
+          <div class="ntext" id="tl-text">Сборки ставятся в TLauncher и запускаются из него — сначала установи его.</div>
+        </div>
+        <button class="btn primary" id="tl-install"><span data-icon="cloud-download"></span>Установить TLauncher</button>
+      </div>
       <div id="cloud-line" class="line muted">Проверяю серверы…</div>
       <div id="cards" class="cards"></div>
       <div class="progress-panel hidden" id="play-progress">
@@ -107,21 +115,27 @@
     <section class="page" id="page-skin">
       <div class="cols">
         <div class="panel skin-preview">
-          <canvas id="skin-face" width="8" height="8"></canvas>
-          <div class="muted small" id="skin-file">Скин ещё не выбран</div>
+          <div class="skin-tag" id="skin-tag">Загружаю…</div>
+          <canvas id="skin-3d"></canvas>
+          <canvas id="skin-face" class="hidden" width="8" height="8"></canvas>
+          <div class="skin-tools">
+            <button class="iconbtn" id="skin-anim" title="Пауза"></button>
+            <span class="muted small">Тяни мышкой, чтобы покрутить</span>
+          </div>
         </div>
         <div class="panel">
           <h2 class="px">Скин на сервере</h2>
-          <p class="muted">Скин видят все игроки на наших серверах (через мод CustomSkinLoader).</p>
+          <p class="muted">Скин видят все игроки на наших серверах (через мод CustomSkinLoader). Выбери PNG, посмотри, как он сидит, и загрузи.</p>
           <label class="field"><span>Ник как в TLauncher</span><input id="nick" maxlength="16"></label>
           <div class="models">
             <label><input type="radio" name="model" value="default" checked><span>Обычная модель</span></label>
             <label><input type="radio" name="model" value="slim"><span>Тонкие руки (Алекс)</span></label>
           </div>
           <div class="row2">
-            <button class="btn primary" id="skin-pick"><span data-icon="upload"></span>Загрузить PNG</button>
+            <button class="btn" id="skin-choose"><span data-icon="photo"></span>Выбрать PNG…</button>
             <button class="btn" id="skin-site"><span data-icon="external-link"></span>Найти скин на сайте</button>
           </div>
+          <button class="btn primary wide" id="skin-upload" disabled><span data-icon="upload"></span>Загрузить на сервер</button>
           <div class="line" id="skin-status"></div>
         </div>
       </div>
@@ -133,6 +147,7 @@
 
 <div id="modal" class="hidden"><div class="dialog"><h3 id="modal-title"></h3><div id="modal-body"></div><div class="actions" id="modal-actions"></div></div></div>
 
+<script src="vendor/skinview3d.bundle.js"></script>
 <script src="icons.js"></script>
 <script src="app.js"></script>
 </body>
