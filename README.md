@@ -24,7 +24,7 @@
 - `server_host.py` — вкладка «Сервер»: из сборки, добавленной в «Свои сборки», собирает сервер в выбранной папке — моды без клиентских (по метаданным и по Modrinth, нужные другим модам возвращаются), конфиги, KubeJS и датапаки, серверный загрузчик, полная Java нужной версии (или официальная от Mojang), `start.bat`, `server.properties` с датапаками OpenLoader в `initial-enabled-packs`. Настройки сервера правятся в окне лаунчера.
 - `cloud_server.py` — облако на ПК хоста (порт 8518), раздаёт папку `launcher-cloud` и принимает скины игроков (`POST /skins/upload`). В игре скины показывает мод CustomSkinLoader. Токены ников лежат в `skin_tokens.json` (не в git); чтобы сбросить ник, удали его строку оттуда. Запускается из `start.bat`.
 - `update_manifest.py` — пересобирает манифесты всех сборок, `launcher-cloud/packs.json` и `launcher-cloud/launcher.json` (хэш свежего `MineForFriends.exe`; копия `MineSerc.exe` — для лаунчеров до переименования) после любых изменений в облаке.
-- Лаунчер сам обновляется: при запуске сверяет себя с `launcher.json` и, если в облаке новая версия, скачивает её, подменяет свой exe и перезапускается. Друзьям хватает один раз получить `MineForFriends.exe`. Настройки прежнего MineSerc (`%APPDATA%\MineSerc`) переезжают в `%APPDATA%\MineForFriends` сами.
+- Лаунчер сам обновляется: при запуске сверяет себя с последним релизом на GitHub (или с `launcher.json` в облаке, если GitHub недоступен) и, если вышла новая версия, скачивает её, подменяет свой exe и перезапускается. Друзьям хватает один раз получить `MineForFriends.exe`. Настройки прежнего MineSerc (`%APPDATA%\MineSerc`) переезжают в `%APPDATA%\MineForFriends` сами.
 - `make_icon.py` — рисует `icon.ico` (пиксельный блок травы).
 - `get_mods.py` — скачивает моды с Modrinth под Fabric 26.3 вместе с зависимостями.
 
@@ -43,7 +43,10 @@ python -m venv .venv
 .venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed --name MineForFriends --icon "%CD%\icon.ico" --add-data "%CD%\icon.ico;." --add-data "%CD%\ui;ui" --exclude-module minecraft_launcher_lib --exclude-module tkinter --distpath dist --workpath build --specpath build launcher.py
 copy dist\MineForFriends.exe ..\launcher-cloud\MineForFriends.exe
 .venv\Scripts\python.exe update_manifest.py
+gh release create v<версия> dist\MineForFriends.exe --title "MineForFriends <версия>" --latest
 ```
+
+Версию (`APP_VERSION` в `launcher.py`) поднимай перед каждой сборкой. Лаунчер берёт обновления из последнего релиза на GitHub (сверяет SHA-256 файла), а если GitHub недоступен — из облака; старые версии до 0.5.1 знают только облако, поэтому выкладывай в оба места.
 
 ## Отладка
 

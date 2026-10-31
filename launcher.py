@@ -29,7 +29,7 @@ import custom_packs
 import server_host
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.5 beta"
+APP_VERSION = "0.5.1 beta"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -57,6 +57,8 @@ DEFAULT_PACK = {
 STATUS_REFRESH = 30_000
 # Описание свежего MineForFriends.exe в облаке ({"sha1", "size"}), пишет update_manifest.py
 LAUNCHER_INFO = "launcher.json"
+# Последний релиз на GitHub: основной источник обновлений лаунчера, работает и без Radmin
+GITHUB_LATEST = "https://api.github.com/repos/TejkaFan/MineForFriends/releases/latest"
 # Внутри exe ресурсы лежат во временной папке PyInstaller
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 
@@ -88,8 +90,8 @@ def save_json(path: Path, data) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
 
 
-def sha1(path: Path) -> str:
-    h = hashlib.sha1()
+def sha1(path: Path, algo: str = "sha1") -> str:
+    h = hashlib.new(algo)
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
@@ -225,15 +227,39 @@ def inside(base: Path, rel: str):
     return path if base.resolve() in path.parents else None
 
 
+def latest_launcher():
+    """Где взять свежий MineForFriends.exe: (сессия, ссылка, алгоритм хэша, хэш) или None.
+
+    Сначала последний релиз на GitHub, а если GitHub недоступен или в релизе нет exe —
+    облако хоста (launcher.json).
+    """
+    try:
+        r = web.get(GITHUB_LATEST, timeout=8, headers={"Accept": "application/vnd.github+json"})
+        r.raise_for_status()
+        asset = next((a for a in r.json().get("assets", []) if a.get("name") == LAUNCHER_EXE), None)
+        algo, _, digest = str((asset or {}).get("digest") or "").partition(":")
+        if algo == "sha256" and digest:
+            return web, asset["browser_download_url"], "sha256", digest
+    except (requests.RequestException, ValueError, KeyError):
+        traceback.print_exc()
+    try:
+        info = cloud.get(f"{CLOUD_URL}/{LAUNCHER_INFO}", timeout=5).json()
+        if info.get("sha1"):
+            return cloud, f"{CLOUD_URL}/{LAUNCHER_EXE}", "sha1", info["sha1"]
+    except (requests.RequestException, ValueError):
+        traceback.print_exc()
+    return None
+
+
 def self_update(status) -> bool:
-    """Если в облаке новый MineForFriends.exe — ставит его на место текущего и запускает.
+    """Если вышел новый MineForFriends.exe — ставит его на место текущего и запускает.
 
     Запущенный exe Windows не даёт перезаписать, но даёт переименовать: старый
     уезжает в <имя>.old.exe и удаляется при следующем запуске. Имя файла у игрока
     не меняется, чтобы не ломать его ярлыки.
     True — новая версия запущена, этот экземпляр нужно закрыть.
     """
-    # --no-update: проверить свежесобранный exe, пока в облаке старый
+    # --no-update: проверить свежесобранный exe, пока не выложен
     if not getattr(sys, "frozen", False) or "--no-update" in sys.argv:
         return False
     exe = Path(sys.executable)
@@ -242,18 +268,26 @@ def self_update(status) -> bool:
         old.unlink(missing_ok=True)
     except OSError:
         pass  # прошлый экземпляр ещё закрывается
+    latest = latest_launcher()
+    if not latest:
+        return False
+    session, url, algo, digest = latest
     try:
-        info = cloud.get(f"{CLOUD_URL}/{LAUNCHER_INFO}", timeout=5).json()
-        if not info.get("sha1") or sha1(exe) == info["sha1"]:
+        if sha1(exe, algo) == digest:
             return False
         status("Скачиваю новую версию лаунчера…")
         part = exe.with_name(exe.name + ".part")
-        with cloud.get(f"{CLOUD_URL}/{LAUNCHER_EXE}", stream=True, timeout=30) as r:
+        with session.get(url, stream=True, timeout=30) as r:
             r.raise_for_status()
+            total, done, shown = int(r.headers.get("Content-Length") or 0), 0, -1
             with part.open("wb") as f:
                 for chunk in r.iter_content(1 << 16):
                     f.write(chunk)
-        if sha1(part) != info["sha1"]:
+                    done += len(chunk)
+                    if total and done * 100 // total != shown:
+                        shown = done * 100 // total
+                        status(f"Скачиваю новую версию лаунчера… {shown}%")
+        if sha1(part, algo) != digest:
             part.unlink()
             return False
         exe.replace(old)
@@ -263,7 +297,7 @@ def self_update(status) -> bool:
             old.replace(exe)
             raise
     except (requests.RequestException, ValueError, OSError):
-        # Нет облака или нет прав на папку — работаем на текущей версии
+        # Обрыв загрузки или нет прав на папку — работаем на текущей версии
         traceback.print_exc()
         return False
     # Новый exe должен распаковаться заново, а не подхватить временную папку этого
