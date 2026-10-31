@@ -1,15 +1,18 @@
 """MineForFriends by TEJKA — лаунчер-помощник для игры с друзьями через TLauncher.
 
-Для каждой выбранной сборки (кнопка «Сборки…») создаёт в TLauncher свою версию
+Для каждой отмеченной сборки (карточки «Наши серверы») создаёт в TLauncher свою версию
 (Fabric, сервер в «Сетевой игре», отдельная папка игры), синхронизирует её файлы
 с облака на ПК хоста (через Radmin) и открывает TLauncher.
 Ещё загружает скин игрока в облако; в игре его показывает мод CustomSkinLoader.
+Интерфейс — HTML-страница из папки ui/ в окне pywebview (WebView2).
 """
+import base64
 import hashlib
 import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -20,11 +23,13 @@ import webbrowser
 from pathlib import Path
 
 import requests
+import webview
 
 import custom_packs
 import server_host
 
 APP_NAME = "MineForFriends by TEJKA"
+APP_VERSION = "0.5 beta"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -33,10 +38,13 @@ OLD_APP_ID = "MineSerc"
 CLOUD_URL = "http://26.199.180.115:8518"
 # Каталог скинов: там можно скачать PNG и выбрать его кнопкой «Выбрать скин»
 SKINS_SITE = "https://www.minecraftskins.com/"
+REPO_URL = "https://github.com/TejkaFan/MineForFriends"
 APPDATA = Path(os.environ.get("APPDATA", Path.home()))
 TL_PROPERTIES = APPDATA / ".tlauncher" / "tlauncher-2.0.properties"
 SETTINGS_FILE = APPDATA / APP_ID / "settings.json"
 OLD_SETTINGS_FILE = APPDATA / OLD_APP_ID / "settings.json"
+# Копия последнего загруженного скина — для аватарки в шапке
+SKIN_FILE = SETTINGS_FILE.parent / "skin.png"
 MOJANG_MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 
 # Основная сборка; старый манифест облака не содержит этих полей
@@ -225,7 +233,8 @@ def self_update(status) -> bool:
     не меняется, чтобы не ломать его ярлыки.
     True — новая версия запущена, этот экземпляр нужно закрыть.
     """
-    if not getattr(sys, "frozen", False):
+    # --no-update: проверить свежесобранный exe, пока в облаке старый
+    if not getattr(sys, "frozen", False) or "--no-update" in sys.argv:
         return False
     exe = Path(sys.executable)
     old = exe.with_name(exe.stem + ".old.exe")
@@ -492,7 +501,7 @@ class Updater:
         ids = pack_ids or selected_packs()
         chosen = [e for e in self.fetch_packs() if e["id"] in ids]
         if not chosen:
-            raise RuntimeError("Не выбрано ни одной сборки. Нажми «Сборки…» и отметь нужные.")
+            raise RuntimeError("Не выбрано ни одной сборки. Отметь нужные карточки на вкладке «Наши серверы».")
 
         versions, notes = [], []
         for entry in chosen:
@@ -524,259 +533,6 @@ def save_custom_profiles(profiles: list) -> None:
     save_json(SETTINGS_FILE, settings)
 
 
-def custom_tab(tabs, ui, mc_dir: Path) -> None:
-    """Вкладка «Свои сборки»: папка или zip игрока → версия в TLauncher."""
-    import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
-
-    tab = ttk.Frame(tabs, padding=10)
-    tabs.add(tab, text="Свои сборки")
-    tab.columnconfigure(0, weight=1)
-    ttk.Label(tab, text="Добавь в TLauncher любую сборку — папку или архив (CurseForge, Modrinth, "
-                        "MultiMC/Prism или просто папку с модами). Загрузчик и недостающие моды "
-                        "лаунчер скачает сам.", wraplength=330, foreground="gray").grid(row=0, sticky="w")
-    pick_row = ttk.Frame(tab)
-    pick_row.grid(row=1, pady=(8, 0), sticky="we")
-    pick_row.columnconfigure((0, 1), weight=1, uniform="pick")
-    pick_dir = ttk.Button(pick_row, text="Выбрать папку…")
-    pick_dir.grid(column=0, row=0, sticky="we", padx=(0, 3))
-    pick_zip = ttk.Button(pick_row, text="Выбрать архив…")
-    pick_zip.grid(column=1, row=0, sticky="we", padx=(3, 0))
-
-    # Что нашли в сборке; всё можно поправить перед установкой
-    box = ttk.LabelFrame(tab, text="Сборка", padding=8)
-    box.grid(row=2, pady=(10, 0), sticky="we")
-    box.columnconfigure(1, weight=1)
-    name_var, mc_var, loader_var, lver_var = tk.StringVar(), tk.StringVar(), tk.StringVar(), tk.StringVar()
-    mode_var, auto_var = tk.StringVar(value="auto"), tk.StringVar()
-    ttk.Label(box, text="Название:").grid(column=0, row=0, sticky="w", pady=2)
-    name_entry = ttk.Entry(box, textvariable=name_var)
-    name_entry.grid(column=1, row=0, sticky="we", padx=(6, 0), pady=2)
-
-    # Версия игры: авто — подобрал лаунчер, вручную — из списка всех версий
-    ttk.Label(box, text="Minecraft:").grid(column=0, row=1, sticky="nw", pady=(4, 2))
-    ver = ttk.Frame(box)
-    ver.grid(column=1, row=1, sticky="we", padx=(6, 0), pady=2)
-    ver.columnconfigure(1, weight=1)
-    auto_rb = ttk.Radiobutton(ver, text="Авто:", variable=mode_var, value="auto")
-    auto_rb.grid(column=0, row=0, sticky="w")
-    ttk.Label(ver, textvariable=auto_var, wraplength=200).grid(column=1, row=0, sticky="w", padx=(4, 0))
-    manual_rb = ttk.Radiobutton(ver, text="Вручную:", variable=mode_var, value="manual")
-    manual_rb.grid(column=0, row=1, sticky="w", pady=(4, 0))
-    mc_box = ttk.Combobox(ver, textvariable=mc_var, state="readonly", width=12, height=15)
-    mc_box.grid(column=1, row=1, sticky="w", padx=(4, 0), pady=(4, 0))
-
-    ttk.Label(box, text="Загрузчик:").grid(column=0, row=2, sticky="w", pady=2)
-    loader_row = ttk.Frame(box)
-    loader_row.grid(column=1, row=2, sticky="we", padx=(6, 0), pady=2)
-    loader_row.columnconfigure(1, weight=1)
-    names = [custom_packs.LOADER_NAMES[l] for l in custom_packs.LOADERS]
-    loader_box = ttk.Combobox(loader_row, textvariable=loader_var, values=names, state="readonly", width=10)
-    loader_box.grid(column=0, row=0)
-    lver = ttk.Combobox(loader_row, textvariable=lver_var, state="readonly", width=14, height=15)
-    lver.grid(column=1, row=0, sticky="we", padx=(6, 0))
-    fields = [name_entry, auto_rb, manual_rb, mc_box, loader_box, lver]
-    AUTO_LOADER = "авто (последняя)"
-    fit_var = tk.StringVar()
-    ttk.Label(ver, textvariable=fit_var, foreground="#c62828", wraplength=230).grid(column=0, row=2, columnspan=2, sticky="w")
-    info_var = tk.StringVar(value="Выбери папку или архив со сборкой.")
-    ttk.Label(box, textvariable=info_var, wraplength=310, foreground="gray").grid(column=0, row=3, columnspan=2, sticky="w", pady=(6, 0))
-    add = ttk.Button(box, text="Добавить в TLauncher")
-    add.grid(column=0, row=4, columnspan=2, sticky="we", pady=(8, 0))
-    bar = ttk.Progressbar(tab, maximum=1.0)
-    bar.grid(row=3, pady=(10, 2), sticky="we")
-    status_var = tk.StringVar()
-    ttk.Label(tab, textvariable=status_var, wraplength=330).grid(row=4, sticky="w")
-
-    mine = ttk.LabelFrame(tab, text="Мои сборки", padding=8)
-    mine.grid(row=5, pady=(10, 0), sticky="we")
-    mine.columnconfigure((0, 1), weight=1, uniform="mine")
-    listbox = tk.Listbox(mine, height=4, activestyle="none")
-    listbox.grid(column=0, row=0, columnspan=2, sticky="we")
-    open_btn = ttk.Button(mine, text="Открыть папку")
-    open_btn.grid(column=0, row=1, sticky="we", padx=(0, 3), pady=(6, 0))
-    remove_btn = ttk.Button(mine, text="Убрать из TLauncher")
-    remove_btn.grid(column=1, row=1, sticky="we", padx=(3, 0), pady=(6, 0))
-
-    plan = {}
-
-    def set_busy(busy: bool):
-        for w in (pick_dir, pick_zip):
-            w.state(["disabled"] if busy else ["!disabled"])
-        for w in (add, *fields):
-            w.state(["disabled"] if busy or not plan else ["!disabled"])
-        if not busy and plan:
-            loader_box.state(["readonly"])
-            lver.state(["readonly"])
-            mc_box.state(["readonly"] if mode_var.get() == "manual" else ["disabled"])
-
-    def current_mc():
-        return mc_var.get() if mode_var.get() == "manual" else plan.get("minecraft")
-
-    def current_loader():
-        return next(k for k, v in custom_packs.LOADER_NAMES.items() if v == loader_var.get())
-
-    def refresh_loader_versions(*_):
-        # Список версий загрузчика под выбранную версию игры
-        if not plan:
-            return
-        loader, mc = current_loader(), current_mc()
-        # Предупреждение, если на выбранной вручную версии часть модов не запустится
-        specs = plan.get("mod_specs") or []
-        fits = custom_packs.fit_count(specs, mc) if specs and mc else len(specs)
-        fit_var.set(f"На {mc} подойдут модов: {fits} из {len(specs)}" if fits < len(specs) else "")
-        if loader == "vanilla":
-            lver.configure(values=[])
-            lver_var.set("—")
-            return
-        lver_var.set("загружаю…")
-        threading.Thread(target=loader_versions_worker, args=(loader, mc), daemon=True).start()
-
-    def loader_versions_worker(loader, mc):
-        try:
-            versions = custom_packs.loader_versions(loader, mc)
-        except Exception:
-            versions = None  # нет сети — оставим только «авто»
-        ui(loader_versions_done, loader, mc, versions)
-
-    def loader_versions_done(loader, mc, versions):
-        if (loader, mc) != (current_loader(), current_mc()):
-            return  # пока грузили, игрок уже выбрал другое
-        if versions == []:
-            lver.configure(values=[])
-            lver_var.set(f"нет для {mc}")
-            return
-        lver.configure(values=[AUTO_LOADER] + (versions or []))
-        detected = plan.get("loader_version")
-        same = loader == plan["loader"] and mc == plan["minecraft"]
-        lver_var.set(detected if same and detected else AUTO_LOADER)
-
-    def on_mode():
-        if mode_var.get() == "manual" and not mc_var.get():
-            mc_var.set(plan.get("minecraft") or "")
-        set_busy(False)
-        refresh_loader_versions()
-
-    def refresh_list():
-        listbox.delete(0, "end")
-        for p in custom_profiles():
-            loader = custom_packs.LOADER_NAMES.get(p["loader"], p["loader"])
-            listbox.insert("end", f"{p['name']} — {p['minecraft']}, {loader}")
-
-    def analyzed(result):
-        plan.clear()
-        plan.update(result)
-        name_var.set(result["name"])
-        mode_var.set("auto")
-        auto_var.set(f"{result['minecraft'] or '—'} ({result.get('mc_source', '')})")
-        mc_var.set(result["minecraft"] or "")
-        mc_box.configure(values=result.get("releases") or [])
-        loader_var.set(custom_packs.LOADER_NAMES[result["loader"]])
-        kinds = {"curseforge": "CurseForge", "modrinth": "Modrinth", "multimc": "MultiMC/Prism", "folder": "папка с модами"}
-        parts = [kinds[result["format"]], f"модов: {result['mods']}"]
-        if result["downloads"]:
-            parts.append(f"докачать файлов: {len(result['downloads'])}")
-        if result["missing"]:
-            parts.append(f"не хватает зависимостей: {len(result['missing'])} (найду на Modrinth)")
-        info_var.set(" · ".join(parts) + ("\n" + " ".join(result["notes"]) if result["notes"] else ""))
-        status_var.set("Проверь данные и нажми «Добавить в TLauncher».")
-        bar.configure(value=0)
-        set_busy(False)
-        refresh_loader_versions()
-
-    def analyze_worker(path: Path):
-        try:
-            ui(analyzed, custom_packs.analyze(path, status=lambda s: ui(status_var.set, s)))
-        except Exception as e:
-            traceback.print_exc()
-            ui(messagebox.showerror, APP_NAME, f"Не удалось разобрать сборку:\n\n{e}")
-            ui(status_var.set, "")
-            ui(set_busy, False)
-
-    def choose(path):
-        if path:
-            plan.clear()
-            set_busy(True)
-            info_var.set(Path(path).name)
-            threading.Thread(target=analyze_worker, args=(Path(path),), daemon=True).start()
-
-    def install_worker(chosen: dict):
-        try:
-            res = custom_packs.install(chosen, mc_dir, status=lambda s: ui(status_var.set, s),
-                                       progress=lambda v: ui(bar.configure, {"value": v}))
-            profiles = [p for p in custom_profiles() if p["version_id"] != res["version_id"]] + [
-                {k: res[k] for k in ("name", "version_id", "game_dir", "minecraft", "loader", "loader_version")}]
-            save_custom_profiles(profiles)
-            text = f"Готово! В TLauncher выбери версию «{res['version_id']}» и нажми «Войти в игру»."
-            if chosen["mods"] > 150:
-                text += "\n\nСборка большая — выдели в настройках TLauncher не меньше 6 ГБ памяти."
-            if res["notes"]:
-                text += "\n\n" + "\n".join(res["notes"])
-            ui(refresh_list)
-            ui(status_var.set, f"Готово: «{res['version_id']}» добавлена в TLauncher.")
-            ui(messagebox.showinfo, APP_NAME, text)
-        except Exception as e:
-            traceback.print_exc()
-            ui(messagebox.showerror, APP_NAME, f"Не удалось добавить сборку:\n\n{e}")
-            ui(status_var.set, "Ошибка, попробуй ещё раз")
-        ui(set_busy, False)
-
-    def on_add():
-        loader, mc = current_loader(), current_mc()
-        if not mc or not name_var.get().strip():
-            messagebox.showwarning(APP_NAME, "Заполни название и выбери версию Minecraft.")
-            return
-        lv = lver_var.get()
-        if lv.startswith("нет для"):
-            messagebox.showwarning(APP_NAME, f"{loader_var.get()} для Minecraft {mc} не существует — выбери другую версию.")
-            return
-        if lv == "загружаю…":
-            return
-        if lv in (AUTO_LOADER, "—"):
-            lv = None
-        chosen = {**plan, "name": name_var.get().strip(), "minecraft": mc, "loader": loader, "loader_version": lv}
-        set_busy(True)
-        bar.configure(value=0)
-        threading.Thread(target=install_worker, args=(chosen,), daemon=True).start()
-
-    def selected():
-        sel = listbox.curselection()
-        return custom_profiles()[sel[0]] if sel else None
-
-    def on_open():
-        p = selected()
-        if p and Path(p["game_dir"]).exists():
-            os.startfile(p["game_dir"])
-
-    def on_remove():
-        p = selected()
-        if not p:
-            return
-        if not messagebox.askyesno(APP_NAME, f"Убрать версию «{p['version_id']}» из TLauncher?\n\n"
-                                             f"Папка игры с мирами и настройками останется:\n{p['game_dir']}"):
-            return
-        try:
-            custom_packs.remove(p, mc_dir)
-        except OSError as e:
-            messagebox.showerror(APP_NAME, f"Не удалось удалить версию:\n\n{e}")
-            return
-        save_custom_profiles([x for x in custom_profiles() if x["version_id"] != p["version_id"]])
-        refresh_list()
-
-    pick_dir.configure(command=lambda: choose(filedialog.askdirectory(title="Папка со сборкой")))
-    pick_zip.configure(command=lambda: choose(filedialog.askopenfilename(
-        title="Архив со сборкой", filetypes=[("Сборка", "*.zip *.mrpack"), ("Все файлы", "*.*")])))
-    add.configure(command=on_add)
-    auto_rb.configure(command=on_mode)
-    manual_rb.configure(command=on_mode)
-    mc_box.bind("<<ComboboxSelected>>", refresh_loader_versions)
-    loader_box.bind("<<ComboboxSelected>>", refresh_loader_versions)
-    open_btn.configure(command=on_open)
-    remove_btn.configure(command=on_remove)
-    set_busy(False)
-    refresh_list()
-
-
 def hosted_servers() -> list:
     return load_json(SETTINGS_FILE, {}).get("servers", [])
 
@@ -787,428 +543,277 @@ def save_hosted_servers(servers: list) -> None:
     save_json(SETTINGS_FILE, settings)
 
 
-def server_settings_window(parent, record: dict) -> None:
-    """Окно настроек сервера: server.properties и память в start.bat."""
-    import tkinter as tk
-    from tkinter import messagebox, ttk
-
-    path = Path(record["path"]) / "server.properties"
-    props = {**server_host.DEFAULTS, **server_host.read_properties(path)}
-    win = tk.Toplevel(parent)
-    win.title(f"Настройки сервера — {record['name']}")
-    win.resizable(False, False)
-    win.transient(parent)
-    win.grab_set()
-    box = ttk.Frame(win, padding=14)
-    box.grid()
-    box.columnconfigure(1, weight=1)
-    values = {}
-    row = 0
-    for key, label, kind, choices in server_host.SETTINGS:
-        current = props.get(key, "")
-        if kind == "bool":
-            var = tk.BooleanVar(value=current.lower() == "true")
-            ttk.Checkbutton(box, text=label, variable=var).grid(column=0, row=row, columnspan=2, sticky="w", pady=1)
-        else:
-            ttk.Label(box, text=label + ":").grid(column=0, row=row, sticky="w", pady=2)
-            if kind == "choice":
-                var = tk.StringVar(value=choices.get(current, current))
-                widget = ttk.Combobox(box, textvariable=var, values=list(choices.values()), state="readonly", width=24)
-            elif kind == "int":
-                var = tk.StringVar(value=current)
-                widget = ttk.Spinbox(box, textvariable=var, from_=0, to=65535, width=24)
-            else:
-                var = tk.StringVar(value=current)
-                widget = ttk.Entry(box, textvariable=var, width=26)
-            widget.grid(column=1, row=row, sticky="we", padx=(8, 0), pady=2)
-        values[key] = (var, kind, choices)
-        row += 1
-    ttk.Label(box, text="Память сервера, ГБ:").grid(column=0, row=row, sticky="w", pady=(6, 2))
-    ram_var = tk.StringVar(value=str(record.get("ram", 4)))
-    ttk.Spinbox(box, textvariable=ram_var, from_=1, to=64, width=24).grid(column=1, row=row, sticky="we", padx=(8, 0), pady=(6, 2))
-    row += 1
-    ip = server_host.radmin_ip()
-    hint = f"Друзья подключаются по адресу {ip}:{props.get('server-port')}" if ip else \
-        "Radmin VPN не найден: друзья подключаются по твоему адресу и этому порту"
-    ttk.Label(box, text=hint, foreground="gray", wraplength=360).grid(column=0, row=row, columnspan=2, sticky="w", pady=(8, 0))
-    row += 1
-
-    def save():
-        changes = {}
-        for key, (var, kind, choices) in values.items():
-            value = var.get()
-            if kind == "bool":
-                value = "true" if value else "false"
-            elif kind == "choice":
-                value = next((k for k, v in choices.items() if v == value), value)
-            elif kind == "int":
-                value = str(value).strip()
-                if not value.isdigit():
-                    messagebox.showwarning(APP_NAME, f"«{key}» должно быть числом.", parent=win)
-                    return
-            changes[key] = value
-        changes["query.port"] = changes["server-port"]
-        # Пиратам (TLauncher) мешает проверка подписи чата
-        changes["enforce-secure-profile"] = changes["online-mode"]
-        if not ram_var.get().strip().isdigit():
-            messagebox.showwarning(APP_NAME, "Память — число гигабайт.", parent=win)
-            return
-        try:
-            server_host.write_properties(path, changes)
-            record["ram"] = int(ram_var.get())
-            server_host.write_start(record)
-        except OSError as e:
-            messagebox.showerror(APP_NAME, f"Не удалось сохранить:\n\n{e}", parent=win)
-            return
-        save_hosted_servers([record if s["path"] == record["path"] else s for s in hosted_servers()])
-        win.destroy()
-
-    buttons = ttk.Frame(box)
-    buttons.grid(column=0, row=row, columnspan=2, sticky="e", pady=(12, 0))
-    ttk.Button(buttons, text="Отмена", command=win.destroy).grid(column=0, row=0, padx=(0, 6))
-    ttk.Button(buttons, text="Сохранить", command=save).grid(column=1, row=0)
+def build_id() -> str:
+    # Начало хэша exe: по нему видно, какая сборка лаунчера у игрока
+    return sha1(Path(sys.executable))[:10] if getattr(sys, "frozen", False) else "dev"
 
 
-def server_tab(tabs, ui, mc_dir: Path) -> None:
-    """Вкладка «Сервер»: сервер из сборки, установленной во вкладке «Свои сборки»."""
-    import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
-
-    tab = ttk.Frame(tabs, padding=10)
-    tabs.add(tab, text="Сервер")
-    tab.columnconfigure(0, weight=1)
-    ttk.Label(tab, text="Собери сервер из сборки, добавленной во вкладке «Свои сборки»: лаунчер перенесёт "
-                        "моды (без клиентских), конфиги и датапаки, поставит серверный загрузчик и Java.",
-              wraplength=330, foreground="gray").grid(row=0, sticky="w")
-
-    box = ttk.LabelFrame(tab, text="Новый сервер", padding=8)
-    box.grid(row=1, pady=(10, 0), sticky="we")
-    box.columnconfigure(1, weight=1)
-    ttk.Label(box, text="Сборка:").grid(column=0, row=0, sticky="w")
-    pack_var = tk.StringVar()
-    pack_box = ttk.Combobox(box, textvariable=pack_var, state="readonly")
-    pack_box.grid(column=1, row=0, sticky="we", padx=(6, 0))
-    eula_var = tk.BooleanVar(value=False)
-    eula_row = ttk.Frame(box)
-    eula_row.grid(column=0, row=1, columnspan=2, sticky="w", pady=(8, 0))
-    ttk.Checkbutton(eula_row, text="Я принимаю", variable=eula_var).grid(column=0, row=0)
-    eula_link = ttk.Label(eula_row, text="EULA Minecraft", foreground="#1565c0", cursor="hand2")
-    eula_link.grid(column=1, row=0)
-    eula_link.bind("<Button-1>", lambda e: webbrowser.open(server_host.EULA_URL))
-    host = ttk.Button(box, text="Захостить сервер…")
-    host.grid(column=0, row=2, columnspan=2, sticky="we", pady=(8, 0))
-    bar = ttk.Progressbar(tab, maximum=1.0)
-    bar.grid(row=2, pady=(10, 2), sticky="we")
-    status_var = tk.StringVar()
-    ttk.Label(tab, textvariable=status_var, wraplength=330).grid(row=3, sticky="w")
-
-    mine = ttk.LabelFrame(tab, text="Мои серверы", padding=8)
-    mine.grid(row=4, pady=(10, 0), sticky="we")
-    mine.columnconfigure((0, 1, 2), weight=1, uniform="srv")
-    listbox = tk.Listbox(mine, height=4, activestyle="none")
-    listbox.grid(column=0, row=0, columnspan=3, sticky="we")
-    start_btn = ttk.Button(mine, text="Запустить")
-    start_btn.grid(column=0, row=1, sticky="we", padx=(0, 3), pady=(6, 0))
-    settings_btn = ttk.Button(mine, text="Настройки…")
-    settings_btn.grid(column=1, row=1, sticky="we", padx=3, pady=(6, 0))
-    folder_btn = ttk.Button(mine, text="Папка")
-    folder_btn.grid(column=2, row=1, sticky="we", padx=(3, 0), pady=(6, 0))
-    forget_btn = ttk.Button(mine, text="Убрать из списка")
-    forget_btn.grid(column=0, row=2, columnspan=3, sticky="we", pady=(6, 0))
-
-    def refresh():
-        profiles = custom_profiles()
-        pack_box.configure(values=[p["name"] for p in profiles])
-        if pack_var.get() not in [p["name"] for p in profiles]:
-            pack_var.set(profiles[-1]["name"] if profiles else "")
-        listbox.delete(0, "end")
-        for s in hosted_servers():
-            port = server_host.read_properties(Path(s["path"]) / "server.properties").get("server-port", "?")
-            listbox.insert("end", f"{s['name']} — порт {port}")
-
-    def build_worker(profile, folder):
-        try:
-            taken = {int(server_host.read_properties(Path(s["path"]) / "server.properties").get("server-port", 0) or 0)
-                     for s in hosted_servers()}
-            # Порт основного сервера MineSerc тоже занят
-            taken.add(int(DEFAULT_PACK["server"].rsplit(":", 1)[1]))
-            record = server_host.build(profile, folder, mc_dir, taken, status=lambda s: ui(status_var.set, s),
-                                       progress=lambda v: ui(bar.configure, {"value": v}))
-            server_host.accept_eula(Path(record["path"]))
-            save_hosted_servers(hosted_servers() + [record])
-            ui(refresh)
-            ui(status_var.set, f"Сервер собран: {record['path']}")
-            ui(server_settings_window, tab.winfo_toplevel(), record)
-        except Exception as e:
-            traceback.print_exc()
-            ui(messagebox.showerror, APP_NAME, f"Не удалось собрать сервер:\n\n{e}")
-            ui(status_var.set, "Ошибка, попробуй ещё раз")
-        ui(host.state, ["!disabled"])
-
-    def on_host():
-        profile = next((p for p in custom_profiles() if p["name"] == pack_var.get()), None)
-        if not profile:
-            messagebox.showwarning(APP_NAME, "Сначала добавь сборку во вкладке «Свои сборки».")
-            return
-        if not eula_var.get():
-            messagebox.showwarning(APP_NAME, "Чтобы запустить сервер Minecraft, нужно принять EULA.")
-            return
-        folder = filedialog.askdirectory(title="Куда положить сервер")
-        if not folder:
-            return
-        host.state(["disabled"])
-        bar.configure(value=0)
-        threading.Thread(target=build_worker, args=(profile, Path(folder)), daemon=True).start()
-
-    def selected():
-        sel = listbox.curselection()
-        return hosted_servers()[sel[0]] if sel else None
-
-    def on_start():
-        s = selected()
-        if s:
-            try:
-                server_host.start(s)
-                status_var.set(f"Сервер «{s['name']}» запускается в отдельном окне.")
-            except (OSError, RuntimeError) as e:
-                messagebox.showerror(APP_NAME, str(e))
-
-    def on_settings():
-        s = selected()
-        if s:
-            server_settings_window(tab.winfo_toplevel(), s)
-
-    def on_folder():
-        s = selected()
-        if s and Path(s["path"]).exists():
-            os.startfile(s["path"])
-
-    def on_forget():
-        s = selected()
-        if s and messagebox.askyesno(APP_NAME, f"Убрать «{s['name']}» из списка?\n\nПапка сервера останется:\n{s['path']}"):
-            save_hosted_servers([x for x in hosted_servers() if x["path"] != s["path"]])
-            refresh()
-
-    host.configure(command=on_host)
-    start_btn.configure(command=on_start)
-    settings_btn.configure(command=on_settings)
-    folder_btn.configure(command=on_folder)
-    forget_btn.configure(command=on_forget)
-    # Список сборок мог измениться во второй вкладке
-    tabs.bind("<<NotebookTabChanged>>", lambda e: refresh(), add="+")
-    refresh()
-
-
-def run_gui() -> None:
-    import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
-
-    root = tk.Tk()
-    root.title(APP_NAME)
-    root.resizable(False, False)
+def skin_b64():
     try:
-        root.iconbitmap(str(RESOURCES / "icon.ico"))
-    except tk.TclError:
-        pass
-    head = ttk.Frame(root, padding=(16, 12, 16, 4))
-    head.grid(sticky="we")
-    head.columnconfigure(0, weight=1)
-    title = ttk.Frame(head)
-    title.grid(column=0, row=0, pady=(0, 2))
-    ttk.Label(title, text=APP_ID, font=("Segoe UI", 18, "bold")).grid(column=0, row=0, sticky="s")
-    ttk.Label(title, text=" by TEJKA", font=("Segoe UI", 10, "bold"), foreground="#5d9c3a").grid(column=1, row=0, sticky="s", pady=(0, 4))
-    ttk.Label(head, text="Сборки, серверы и скины для игры с друзьями").grid(column=0, row=1)
-    tabs = ttk.Notebook(root, padding=(12, 6, 12, 12))
-    tabs.grid(sticky="nswe")
-    frm = ttk.Frame(tabs, padding=10)
-    tabs.add(frm, text="Наши серверы")
+        return base64.b64encode(SKIN_FILE.read_bytes()).decode() if SKIN_FILE.exists() else None
+    except OSError:
+        return None
 
-    servers = ttk.LabelFrame(frm, text="Серверы", padding=8)
-    servers.grid(column=0, row=2, pady=(0, 10), sticky="we")
-    servers.columnconfigure(1, weight=1)
-    ttk.Label(servers, text="Проверяю…", foreground="gray").grid(column=0, row=0, sticky="w")
-    bar = ttk.Progressbar(frm, length=340, maximum=1.0)
-    bar.grid(column=0, row=3, pady=(4, 4))
-    status_var = tk.StringVar(value="Нажми «Обновить и открыть TLauncher»")
-    ttk.Label(frm, textvariable=status_var, wraplength=340).grid(column=0, row=4, sticky="w")
-    actions = ttk.Frame(frm)
-    actions.grid(column=0, row=5, pady=(12, 0), sticky="we")
-    actions.columnconfigure(0, weight=1)
-    go = ttk.Button(actions, text="Обновить и открыть TLauncher")
-    go.grid(column=0, row=0, sticky="we")
-    packs_btn = ttk.Button(actions, text="Сборки…")
-    packs_btn.grid(column=1, row=0, padx=(6, 0))
 
-    # Скин: ник как в TLauncher, тип модели и выбор PNG
-    skin = ttk.LabelFrame(frm, text="Скин на сервере", padding=8)
-    skin.grid(column=0, row=6, pady=(14, 0), sticky="we")
-    skin.columnconfigure(2, weight=1)
-    probe = Updater(lambda s: None, lambda v: None)
-    nick_var = tk.StringVar(value=load_json(probe.state_file, {}).get("skin_nick") or tlauncher_nick(probe.mc_dir))
-    slim_var = tk.BooleanVar(value=False)
-    ttk.Label(skin, text="Ник:").grid(column=0, row=0, sticky="w")
-    ttk.Entry(skin, textvariable=nick_var, width=24).grid(column=1, row=0, columnspan=2, sticky="we", padx=(6, 0))
-    ttk.Radiobutton(skin, text="Обычная модель", variable=slim_var, value=False).grid(column=0, row=1, columnspan=2, sticky="w", pady=(6, 0))
-    ttk.Radiobutton(skin, text="Тонкие руки (Алекс)", variable=slim_var, value=True).grid(column=2, row=1, sticky="w", pady=(6, 0))
-    buttons = ttk.Frame(skin)
-    buttons.grid(column=0, row=2, columnspan=3, pady=(8, 0), sticky="we")
-    buttons.columnconfigure((0, 1), weight=1, uniform="skin")
-    pick = ttk.Button(buttons, text="Выбрать скин (PNG)…")
-    pick.grid(column=0, row=0, sticky="we", padx=(0, 3))
-    site = ttk.Button(buttons, text="Найти скин на сайте", command=lambda: webbrowser.open(SKINS_SITE))
-    site.grid(column=1, row=0, sticky="we", padx=(3, 0))
+class Api:
+    """Методы, которые вызывает интерфейс (ui/app.js) через pywebview.api.
 
-    def ui(fn, *a):
-        root.after(0, fn, *a)
+    Каждый вызов из JS идёт в своём потоке, поэтому долгие методы просто работают
+    до конца, а ход работы шлют в интерфейс событиями app.emit().
+    """
 
-    custom_tab(tabs, ui, probe.mc_dir)
-    server_tab(tabs, ui, probe.mc_dir)
+    def __init__(self):
+        self._window = None
+        self._mc_dir = minecraft_dir()
+        self._plan = {}
+        self._booted = False
 
-    def show_servers(entries, statuses):
-        # Индикатор: какой сервер сейчас включён и доступно ли облако со сборками
-        for w in servers.winfo_children():
-            w.destroy()
-        if entries is None:
-            ttk.Label(servers, text="●", foreground="#c62828").grid(column=0, row=0, sticky="w")
-            ttk.Label(servers, text="Облако недоступно — сборки сейчас не загрузить.\nПроверь Radmin VPN или подожди, пока хост включит сервер.",
-                      wraplength=310).grid(column=1, row=0, sticky="w", padx=(6, 0))
+    def _emit(self, event: str, data=None) -> None:
+        try:
+            self._window.run_js(f"app.emit({json.dumps(event)}, {json.dumps(data, ensure_ascii=False)})")
+        except Exception:
+            pass  # окно уже закрыто
+
+    def _status(self, scope: str):
+        return lambda text: self._emit("status", {"scope": scope, "text": text})
+
+    def _progress(self, scope: str):
+        last = [-1.0]
+
+        def report(value):
+            # Не заваливаем интерфейс сотнями событий на мелких файлах
+            if value >= 1 or abs(value - last[0]) >= 0.005:
+                last[0] = value
+                self._emit("progress", {"scope": scope, "value": value})
+        return report
+
+    def _pick(self, kind, file_types=()):
+        picked = self._window.create_file_dialog(kind, file_types=file_types)
+        return picked[0] if picked else None
+
+    # ---- Окно и общее
+
+    def init(self) -> dict:
+        state = load_json(self._mc_dir / DEFAULT_PACK["game_dir"] / "launcher_state.json", {})
+        return {"nick": state.get("skin_nick") or tlauncher_nick(self._mc_dir), "skin": skin_b64(),
+                "loaders": [[l, custom_packs.LOADER_NAMES[l]] for l in custom_packs.LOADERS],
+                "version": APP_VERSION, "build": build_id(), "cloud_url": CLOUD_URL, "mc_dir": str(self._mc_dir),
+                "settings_dir": str(SETTINGS_FILE.parent), "repo": REPO_URL,
+                "eula_url": server_host.EULA_URL, "skins_site": SKINS_SITE}
+
+    def boot(self) -> None:
+        # Интерфейс готов: проверяем версию лаунчера и запускаем индикатор серверов
+        if self._booted:
             return
-        chosen = set(selected_packs())
-        for i, (e, st) in enumerate(zip(entries, statuses)):
-            name = e["name"] + ("" if e["id"] in chosen else " (не выбрана)")
-            if st:
-                color, text = "#2e7d32", f"включён · игроков {st['online']}/{st['max']}"
-            else:
-                color, text = "#9e9e9e", "выключен"
-            ttk.Label(servers, text="●", foreground=color).grid(column=0, row=i, sticky="w")
-            ttk.Label(servers, text=name).grid(column=1, row=i, sticky="w", padx=(6, 12))
-            ttk.Label(servers, text=text, foreground=color).grid(column=2, row=i, sticky="e")
-        ttk.Label(servers, text="Облако доступно — все сборки можно загрузить", foreground="gray").grid(
-            column=0, row=len(entries), columnspan=3, sticky="w", pady=(6, 0))
+        self._booted = True
+        threading.Thread(target=self._watch_servers, daemon=True).start()
+        if self_update(self._status("boot")):
+            self._window.destroy()
+            return
+        self._emit("ready")
 
-    def status_worker(again):
+    def minimize(self) -> None:
+        self._window.minimize()
+
+    def close(self) -> None:
+        self._window.destroy()
+
+    def open_url(self, url: str) -> None:
+        webbrowser.open(url)
+
+    def open_folder(self, path: str) -> None:
+        if Path(path).exists():
+            os.startfile(path)
+
+    # ---- Наши серверы
+
+    def _watch_servers(self) -> None:
+        while True:
+            self._emit("servers", self._servers())
+            time.sleep(STATUS_REFRESH / 1000)
+
+    def _servers(self) -> dict:
+        # Индикатор: какой сервер сейчас включён и доступно ли облако со сборками
         try:
             entries = Updater(lambda s: None, lambda v: None).fetch_packs()
         except Exception:
-            entries = None
-        statuses = []
-        if entries is not None:
-            results = {}
-            threads = [threading.Thread(target=lambda e=e: results.__setitem__(e["id"], server_status(e.get("server") or DEFAULT_PACK["server"])))
-                       for e in entries]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-            statuses = [results.get(e["id"]) for e in entries]
-        ui(show_servers, entries, statuses)
-        if again:
-            ui(root.after, STATUS_REFRESH, refresh_servers)
+            return {"cloud": False, "packs": [], "selected": selected_packs()}
+        results = {}
+        threads = [threading.Thread(target=lambda e=e: results.__setitem__(
+            e["id"], server_status(e.get("server") or DEFAULT_PACK["server"]))) for e in entries]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        packs = [{"id": e["id"], "name": e["name"], "description": e.get("description", ""), "size": e.get("size"),
+                  "status": results.get(e["id"])} for e in entries]
+        return {"cloud": True, "packs": packs, "selected": selected_packs()}
 
-    def refresh_servers(again=True):
-        threading.Thread(target=status_worker, args=(again,), daemon=True).start()
+    def set_selected(self, ids: list) -> None:
+        save_selected_packs(ids)
 
-    def worker():
-        upd = Updater(lambda s: ui(status_var.set, s), lambda v: ui(bar.configure, {"value": v}))
+    def play(self) -> str:
+        message = Updater(self._status("play"), self._progress("play")).run()
+        threading.Timer(6, self._window.destroy).start()
+        return message
+
+    # ---- Свои сборки
+
+    def pick_folder(self):
+        return self._pick(webview.FileDialog.FOLDER)
+
+    def pick_archive(self):
+        return self._pick(webview.FileDialog.OPEN, ("Сборка (*.zip;*.mrpack)", "Все файлы (*.*)"))
+
+    def analyze(self, path: str) -> dict:
+        self._plan = {}
+        result = custom_packs.analyze(Path(path), status=self._status("custom"))
+        self._plan = result
+        kinds = {"curseforge": "CurseForge", "modrinth": "Modrinth", "multimc": "MultiMC/Prism", "folder": "папка с модами"}
+        parts = [kinds[result["format"]], f"модов: {result['mods']}"]
+        if result["downloads"]:
+            parts.append(f"докачать файлов: {len(result['downloads'])}")
+        if result["missing"]:
+            parts.append(f"не хватает зависимостей: {len(result['missing'])} (найду на Modrinth)")
+        info = " · ".join(parts) + ("\n" + " ".join(result["notes"]) if result["notes"] else "")
+        return {"name": result["name"], "minecraft": result["minecraft"], "mc_source": result.get("mc_source", ""),
+                "releases": result.get("releases") or [], "loader": result["loader"],
+                "loader_version": result.get("loader_version"), "info": info}
+
+    def fit_count(self, mc: str) -> dict:
+        specs = self._plan.get("mod_specs") or []
+        fits = custom_packs.fit_count(specs, mc) if specs and mc else len(specs)
+        return {"fits": fits, "total": len(specs)}
+
+    def loader_versions(self, loader: str, mc: str):
         try:
-            ui(status_var.set, upd.run())
-            ui(root.after, 6000, root.destroy)
-        except Exception as e:
-            traceback.print_exc()
-            ui(messagebox.showerror, APP_NAME, str(e))
-            ui(status_var.set, "Ошибка, попробуй ещё раз")
-            ui(go.state, ["!disabled"])
+            return custom_packs.loader_versions(loader, mc)
+        except Exception:
+            return None  # нет сети — останется только «авто»
 
-    def on_go():
-        go.state(["disabled"])
-        threading.Thread(target=worker, daemon=True).start()
+    def install_custom(self, name: str, mc: str, loader: str, loader_version) -> dict:
+        chosen = {**self._plan, "name": name, "minecraft": mc, "loader": loader, "loader_version": loader_version}
+        res = custom_packs.install(chosen, self._mc_dir, status=self._status("custom"), progress=self._progress("custom"))
+        profiles = [p for p in custom_profiles() if p["version_id"] != res["version_id"]] + [
+            {k: res[k] for k in ("name", "version_id", "game_dir", "minecraft", "loader", "loader_version")}]
+        save_custom_profiles(profiles)
+        text = f"В TLauncher выбери версию «{res['version_id']}» и нажми «Войти в игру»."
+        if chosen["mods"] > 150:
+            text += "\n\nСборка большая — выдели в настройках TLauncher не меньше 6 ГБ памяти."
+        if res["notes"]:
+            text += "\n\n" + "\n".join(res["notes"])
+        return {"version_id": res["version_id"], "text": text}
 
-    def show_packs(entries):
-        # Окно выбора сборок: отмеченные устанавливаются и обновляются кнопкой «Обновить»
-        win = tk.Toplevel(root)
-        win.title("Сборки")
-        win.resizable(False, False)
-        win.transient(root)
-        win.grab_set()
-        box = ttk.Frame(win, padding=16)
-        box.grid()
-        ttk.Label(box, text="Отметь сборки, которые нужно установить и обновлять:").grid(column=0, row=0, sticky="w", pady=(0, 8))
-        chosen = set(selected_packs())
-        checks = {}
-        for i, e in enumerate(entries):
-            checks[e["id"]] = tk.BooleanVar(value=e["id"] in chosen)
-            size = f" — {e['size'] / 2**20:.0f} МБ" if e.get("size") else ""
-            ttk.Checkbutton(box, text=e["name"] + size, variable=checks[e["id"]]).grid(column=0, row=1 + 2 * i, sticky="w")
-            if e.get("description"):
-                ttk.Label(box, text=e["description"], foreground="gray", wraplength=320).grid(
-                    column=0, row=2 + 2 * i, sticky="w", padx=(22, 0), pady=(0, 6))
+    def profile_list(self) -> list:
+        return [{**p, "loader_name": custom_packs.LOADER_NAMES.get(p["loader"], p["loader"])} for p in custom_profiles()]
 
-        def save():
-            ids = [pid for pid, var in checks.items() if var.get()]
-            if not ids:
-                messagebox.showwarning(APP_NAME, "Отметь хотя бы одну сборку.", parent=win)
-                return
-            save_selected_packs(ids)
-            names = ", ".join(e["name"] for e in entries if e["id"] in ids)
-            status_var.set(f"Выбрано: {names}. Нажми «Обновить и открыть TLauncher».")
-            win.destroy()
-            refresh_servers(again=False)
+    def remove_profile(self, version_id: str) -> None:
+        profile = next((p for p in custom_profiles() if p["version_id"] == version_id), None)
+        if profile:
+            custom_packs.remove(profile, self._mc_dir)
+            save_custom_profiles([p for p in custom_profiles() if p["version_id"] != version_id])
 
-        ttk.Button(box, text="Сохранить", command=save).grid(column=0, row=1 + 2 * len(entries), sticky="e", pady=(10, 0))
+    # ---- Сервер
 
-    def packs_worker():
-        upd = Updater(lambda s: ui(status_var.set, s), lambda v: None)
-        try:
-            entries = upd.fetch_packs()
-            ui(status_var.set, "Выбери сборки")
-            ui(show_packs, entries)
-        except Exception as e:
-            traceback.print_exc()
-            ui(messagebox.showerror, APP_NAME, str(e))
-            ui(status_var.set, "Не удалось получить список сборок")
-        ui(packs_btn.state, ["!disabled"])
+    def _server(self, path: str) -> dict:
+        record = next((s for s in hosted_servers() if s["path"] == path), None)
+        if not record:
+            raise RuntimeError("Сервер не найден в списке.")
+        return record
 
-    def on_packs():
-        packs_btn.state(["disabled"])
-        threading.Thread(target=packs_worker, daemon=True).start()
+    def server_list(self) -> list:
+        ip = server_host.radmin_ip() or "localhost"
+        servers = []
+        for s in hosted_servers():
+            port = server_host.read_properties(Path(s["path"]) / "server.properties").get("server-port", "?")
+            servers.append({"name": s["name"], "path": s["path"], "minecraft": s.get("minecraft", ""),
+                            "loader_name": custom_packs.LOADER_NAMES.get(s.get("loader"), s.get("loader", "")),
+                            "address": f"{ip}:{port}"})
+        return servers
 
-    def skin_worker(nick, png, slim):
-        upd = Updater(lambda s: ui(status_var.set, s), lambda v: None)
-        try:
-            ui(status_var.set, upd.upload_skin(nick, png, slim))
-        except Exception as e:
-            traceback.print_exc()
-            ui(messagebox.showerror, APP_NAME, str(e))
-            ui(status_var.set, "Скин не загружен")
-        ui(pick.state, ["!disabled"])
+    def host_server(self, pack_name: str):
+        profile = next((p for p in custom_profiles() if p["name"] == pack_name), None)
+        if not profile:
+            raise RuntimeError("Сначала добавь сборку во вкладке «Свои сборки».")
+        folder = self._pick(webview.FileDialog.FOLDER)
+        if not folder:
+            return None
+        self._progress("host")(0)
+        taken = {int(server_host.read_properties(Path(s["path"]) / "server.properties").get("server-port", 0) or 0)
+                 for s in hosted_servers()}
+        # Порт основного сервера MineSerc тоже занят
+        taken.add(int(DEFAULT_PACK["server"].rsplit(":", 1)[1]))
+        record = server_host.build(profile, Path(folder), self._mc_dir, taken,
+                                   status=self._status("host"), progress=self._progress("host"))
+        server_host.accept_eula(Path(record["path"]))
+        save_hosted_servers(hosted_servers() + [record])
+        return {"name": record["name"], "path": record["path"]}
 
-    def on_pick():
-        nick = nick_var.get().strip()
-        if not nick:
-            messagebox.showwarning(APP_NAME, "Впиши ник, под которым играешь в TLauncher.")
-            return
-        png = filedialog.askopenfilename(title="Выбери скин", filetypes=[("Скин PNG", "*.png")])
-        if png:
-            pick.state(["disabled"])
-            threading.Thread(target=skin_worker, args=(nick, Path(png), slim_var.get()), daemon=True).start()
+    def server_settings(self, path: str) -> dict:
+        record = self._server(path)
+        props = {**server_host.DEFAULTS, **server_host.read_properties(Path(path) / "server.properties")}
+        fields = []
+        for key, label, kind, choices in server_host.SETTINGS:
+            value = props.get(key, "")
+            field = {"key": key, "label": label, "kind": kind, "value": value.lower() == "true" if kind == "bool" else value}
+            if kind == "choice":
+                field["choices"] = list(choices.items())
+            fields.append(field)
+        ip = server_host.radmin_ip()
+        hint = (f"Друзья подключаются по адресу {ip}:{props.get('server-port')}" if ip else
+                "Radmin VPN не найден: друзья подключаются по твоему адресу и этому порту")
+        return {"name": record["name"], "fields": fields, "ram": record.get("ram", 4), "hint": hint}
 
-    go.configure(command=on_go)
-    packs_btn.configure(command=on_packs)
-    pick.configure(command=on_pick)
+    def save_server_settings(self, path: str, values: dict) -> None:
+        record = self._server(path)
+        changes = {}
+        for key, label, kind, _ in server_host.SETTINGS:
+            value = values.get(key)
+            if kind == "bool":
+                value = "true" if value else "false"
+            elif kind == "int":
+                value = str(value).strip()
+                if not value.isdigit():
+                    raise RuntimeError(f"«{label}» — должно быть числом.")
+            changes[key] = str(value)
+        changes["query.port"] = changes["server-port"]
+        # Пиратам (TLauncher) мешает проверка подписи чата
+        changes["enforce-secure-profile"] = changes["online-mode"]
+        ram = str(values.get("ram", "")).strip()
+        if not ram.isdigit() or int(ram) < 1:
+            raise RuntimeError("Память — целое число гигабайт.")
+        server_host.write_properties(Path(path) / "server.properties", changes)
+        record["ram"] = int(ram)
+        server_host.write_start(record)
+        save_hosted_servers([record if s["path"] == path else s for s in hosted_servers()])
 
-    def self_update_worker():
-        # Пока проверяем версию лаунчера, кнопки сборок неактивны
-        if self_update(lambda s: ui(status_var.set, s)):
-            ui(root.destroy)
-            return
-        ui(go.state, ["!disabled"])
-        ui(packs_btn.state, ["!disabled"])
+    def start_server(self, path: str) -> str:
+        record = self._server(path)
+        server_host.start(record)
+        return f"Сервер «{record['name']}» запускается в отдельном окне."
 
-    go.state(["disabled"])
-    packs_btn.state(["disabled"])
-    threading.Thread(target=self_update_worker, daemon=True).start()
-    refresh_servers()
-    root.mainloop()
+    def forget_server(self, path: str) -> None:
+        save_hosted_servers([s for s in hosted_servers() if s["path"] != path])
+
+    # ---- Скин
+
+    def upload_skin(self, nick: str, slim: bool):
+        png = self._pick(webview.FileDialog.OPEN, ("Скин PNG (*.png)",))
+        if not png:
+            return None
+        message = Updater(self._status("skin"), lambda v: None).upload_skin(nick, Path(png), slim)
+        # Копия для аватарки в шапке лаунчера
+        SKIN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(png, SKIN_FILE)
+        return {"message": message, "skin": skin_b64()}
+
+
+def run_gui() -> None:
+    api = Api()
+    api._window = webview.create_window(
+        APP_NAME, url=str(RESOURCES / "ui" / "index.html"), js_api=api, width=1000, height=660,
+        resizable=False, frameless=True, easy_drag=False, background_color="#14171c")
+    webview.start(http_server=True, icon=str(RESOURCES / "icon.ico"))
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 - manifest.json — основная сборка MineSerc (моды из mods/, ресурспаки из resourcepacks/);
 - packs/<id>/manifest.json — дополнительные сборки: все файлы папки packs/<id>/,
   настройки берутся из packs/<id>/pack.json;
-- packs.json — список всех сборок для кнопки «Сборки…» в лаунчере.
+- packs.json — список всех сборок для карточек серверов в лаунчере.
 
 Запускать после любых изменений в облаке:
     D:\\MineSerc-Fabric\\launcher\\.venv\\Scripts\\python.exe D:\\MineSerc-Fabric\\launcher\\update_manifest.py

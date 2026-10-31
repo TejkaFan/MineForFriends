@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>MineForFriends by TEJKA</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+  <nav id="side">
+    <div class="logo pywebview-drag-region" title="MineForFriends by TEJKA"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <button class="nav active" data-page="play" data-icon="player-play" title="Наши серверы"></button>
+    <button class="nav" data-page="custom" data-icon="box" title="Свои сборки"></button>
+    <button class="nav" data-page="server" data-icon="server-2" title="Сервер"></button>
+    <button class="nav" data-page="skin" data-icon="shirt" title="Скин"></button>
+    <div class="grow pywebview-drag-region"></div>
+    <button class="nav small" id="about-btn" data-icon="settings" title="О лаунчере"></button>
+  </nav>
+
+  <main>
+    <header class="pywebview-drag-region">
+      <div class="brand pywebview-drag-region">
+        <span class="px title">MineForFriends</span><span class="px by">by TEJKA</span>
+        <div class="subtitle" id="page-title">Наши серверы</div>
+      </div>
+      <button class="chip" id="player-chip" title="Скин и ник">
+        <canvas id="chip-head" width="8" height="8"></canvas><span id="chip-nick">Игрок</span>
+      </button>
+      <div class="winbtns">
+        <button id="win-min" data-icon="minus" title="Свернуть"></button>
+        <button id="win-close" data-icon="x" title="Закрыть"></button>
+      </div>
+    </header>
+
+    <!-- Наши серверы -->
+    <section class="page active" id="page-play">
+      <div id="cloud-line" class="line muted">Проверяю серверы…</div>
+      <div id="cards" class="cards"></div>
+      <div class="progress-panel hidden" id="play-progress">
+        <span class="ico green" data-icon="cloud-download"></span>
+        <div class="grow"><div class="ptext" id="play-status"></div><div class="bar"><div id="play-bar"></div></div></div>
+      </div>
+      <div class="grow"></div>
+      <div class="play-row">
+        <button class="big px" id="play-btn" disabled>ИГРАТЬ</button>
+        <div class="play-hint" id="play-hint">Проверяю версию лаунчера…</div>
+      </div>
+    </section>
+
+    <!-- Свои сборки -->
+    <section class="page" id="page-custom">
+      <div class="cols">
+        <div class="panel">
+          <h2 class="px">Добавить сборку</h2>
+          <p class="muted">Папка или архив: CurseForge, Modrinth, MultiMC/Prism или просто папка с модами. Загрузчик и недостающие моды лаунчер скачает сам.</p>
+          <div class="row2">
+            <button class="btn" id="pick-dir"><span data-icon="folder"></span>Выбрать папку</button>
+            <button class="btn" id="pick-zip"><span data-icon="file-zip"></span>Выбрать архив</button>
+          </div>
+          <div id="plan" class="hidden">
+            <label class="field"><span>Название</span><input id="plan-name" maxlength="60"></label>
+            <div class="field"><span>Minecraft</span>
+              <div class="seg">
+                <label><input type="radio" name="mc-mode" value="auto" checked><b>Авто</b> <span id="plan-auto"></span></label>
+                <label><input type="radio" name="mc-mode" value="manual"><b>Вручную</b> <select id="plan-mc"></select></label>
+              </div>
+            </div>
+            <div class="warn hidden" id="plan-fit"></div>
+            <div class="field"><span>Загрузчик</span>
+              <div class="row2"><select id="plan-loader"></select><select id="plan-lver"></select></div>
+            </div>
+            <div class="muted small" id="plan-info"></div>
+            <button class="btn primary wide" id="plan-add">Добавить в TLauncher</button>
+          </div>
+          <div class="progress-panel hidden" id="custom-progress">
+            <div class="grow"><div class="ptext" id="custom-status"></div><div class="bar"><div id="custom-bar"></div></div></div>
+          </div>
+        </div>
+        <div class="panel">
+          <h2 class="px">Мои сборки</h2>
+          <div class="list" id="profiles"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Сервер -->
+    <section class="page" id="page-server">
+      <div class="cols">
+        <div class="panel">
+          <h2 class="px">Новый сервер</h2>
+          <p class="muted">Сервер собирается из сборки, добавленной в «Свои сборки»: моды без клиентских, конфиги и датапаки, серверный загрузчик и Java.</p>
+          <label class="field"><span>Сборка</span><select id="host-pack"></select></label>
+          <label class="check"><input type="checkbox" id="eula"><span>Я принимаю <a href="#" id="eula-link">EULA Minecraft</a></span></label>
+          <button class="btn primary wide" id="host-btn"><span data-icon="server-2"></span>Захостить сервер…</button>
+          <div class="progress-panel hidden" id="host-progress">
+            <div class="grow"><div class="ptext" id="host-status"></div><div class="bar"><div id="host-bar"></div></div></div>
+          </div>
+        </div>
+        <div class="panel">
+          <h2 class="px">Мои серверы</h2>
+          <div class="list" id="hosted"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Скин -->
+    <section class="page" id="page-skin">
+      <div class="cols">
+        <div class="panel skin-preview">
+          <canvas id="skin-face" width="8" height="8"></canvas>
+          <div class="muted small" id="skin-file">Скин ещё не выбран</div>
+        </div>
+        <div class="panel">
+          <h2 class="px">Скин на сервере</h2>
+          <p class="muted">Скин видят все игроки на наших серверах (через мод CustomSkinLoader).</p>
+          <label class="field"><span>Ник как в TLauncher</span><input id="nick" maxlength="16"></label>
+          <div class="models">
+            <label><input type="radio" name="model" value="default" checked><span>Обычная модель</span></label>
+            <label><input type="radio" name="model" value="slim"><span>Тонкие руки (Алекс)</span></label>
+          </div>
+          <div class="row2">
+            <button class="btn primary" id="skin-pick"><span data-icon="upload"></span>Загрузить PNG</button>
+            <button class="btn" id="skin-site"><span data-icon="external-link"></span>Найти скин на сайте</button>
+          </div>
+          <div class="line" id="skin-status"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="version" class="px"></div>
+
+<div id="modal" class="hidden"><div class="dialog"><h3 id="modal-title"></h3><div id="modal-body"></div><div class="actions" id="modal-actions"></div></div></div>
+
+<script src="icons.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

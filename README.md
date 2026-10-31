@@ -4,11 +4,12 @@
 
 «MineSerc» ниже — имя нашего основного сервера и его сборки, а не приложения.
 
-- `launcher.py` — сам лаунчер (`MineForFriends.exe`): для каждой сборки, отмеченной в «Сборки…», создаёт свою версию в TLauncher и свою папку игры, добавляет сервер в «Сетевую игру», качает файлы сборки с облака.
+- `launcher.py` — сам лаунчер (`MineForFriends.exe`): для каждой сборки, отмеченной на карточках «Наши серверы», создаёт свою версию в TLauncher и свою папку игры, добавляет сервер в «Сетевую игру», качает файлы сборки с облака.
 - Сборки в облаке:
   - основная `MineSerc 26.3` — `launcher-cloud/manifest.json`, `mods/`, `resourcepacks/`;
   - дополнительные — `launcher-cloud/packs/<id>/` (все файлы папки игры + `pack.json` с версией, загрузчиком и адресом сервера). Сейчас там `homestead` (Homestead 1.20.1, сервер на порту 25566).
   - Файлы из `"once"` в `pack.json` (например, `options.txt`) кладутся только при первой установке; правки игрока в конфигах живут до следующего обновления этого файла в облаке.
+- `ui/` — интерфейс лаунчера (HTML/CSS/JS, тёмная тема «Ночной мир») в окне pywebview на WebView2; логика — класс `Api` в `launcher.py`. Шрифт Press Start 2P (OFL) и иконки Tabler (MIT) лежат локально.
 - `custom_packs.py` — вкладка «Свои сборки»: игрок выбирает папку или архив со сборкой (CurseForge, Modrinth `.mrpack`, MultiMC/Prism или просто папку с модами). Лаунчер определяет версию Minecraft и загрузчик (Fabric, Quilt, Forge, NeoForge), докачивает недостающие моды с CurseForge/Modrinth и их зависимости с Modrinth, ставит загрузчик (Forge/NeoForge — официальным установщиком) и создаёт версию TLauncher с папкой игры `.minecraft/custom/<имя>`.
 - `server_host.py` — вкладка «Сервер»: из сборки, добавленной в «Свои сборки», собирает сервер в выбранной папке — моды без клиентских (по метаданным и по Modrinth, нужные другим модам возвращаются), конфиги, KubeJS и датапаки, серверный загрузчик, полная Java нужной версии (или официальная от Mojang), `start.bat`, `server.properties` с датапаками OpenLoader в `initial-enabled-packs`. Настройки сервера правятся в окне лаунчера.
 - `cloud_server.py` — облако на ПК хоста (порт 8518), раздаёт папку `launcher-cloud` и принимает скины игроков (`POST /skins/upload`). В игре скины показывает мод CustomSkinLoader. Токены ников лежат в `skin_tokens.json` (не в git); чтобы сбросить ник, удали его строку оттуда. Запускается из `start.bat`.
@@ -23,13 +24,13 @@
 
 ```
 python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 ## Сборка MineForFriends.exe
 
 ```
-.venv\Scripts\pyinstaller.exe --noconfirm --onefile --windowed --name MineForFriends --icon "%CD%\icon.ico" --add-data "%CD%\icon.ico;." --exclude-module minecraft_launcher_lib --distpath dist --workpath build --specpath build launcher.py
+.venv\Scripts\python.exe -m PyInstaller --noconfirm --onefile --windowed --name MineForFriends --icon "%CD%\icon.ico" --add-data "%CD%\icon.ico;." --add-data "%CD%\ui;ui" --exclude-module minecraft_launcher_lib --exclude-module tkinter --distpath dist --workpath build --specpath build launcher.py
 copy dist\MineForFriends.exe ..\launcher-cloud\MineForFriends.exe
 .venv\Scripts\python.exe update_manifest.py
 ```
@@ -39,3 +40,5 @@ copy dist\MineForFriends.exe ..\launcher-cloud\MineForFriends.exe
 ```
 .venv\Scripts\python.exe launcher.py --cli --no-open
 ```
+
+`MineForFriends.exe --no-update` — запустить свежесобранный exe без самообновления из облака.
