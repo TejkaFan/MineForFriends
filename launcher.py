@@ -21,6 +21,8 @@ from pathlib import Path
 
 import requests
 
+import custom_packs
+
 APP_NAME = "MineSerc"
 CLOUD_URL = "http://26.199.180.115:8518"
 # Каталог скинов: там можно скачать PNG и выбрать его кнопкой «Выбрать скин»
@@ -494,6 +496,269 @@ class Updater:
         return f"Готово! {where} выбери {which} и нажми «Войти в игру».{' ' + ' '.join(notes) if notes else ''}"
 
 
+def custom_profiles() -> list:
+    return load_json(SETTINGS_FILE, {}).get("custom_profiles", [])
+
+
+def save_custom_profiles(profiles: list) -> None:
+    settings = load_json(SETTINGS_FILE, {})
+    settings["custom_profiles"] = profiles
+    save_json(SETTINGS_FILE, settings)
+
+
+def custom_tab(tabs, ui, mc_dir: Path) -> None:
+    """Вкладка «Свои сборки»: папка или zip игрока → версия в TLauncher."""
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+
+    tab = ttk.Frame(tabs, padding=10)
+    tabs.add(tab, text="Свои сборки")
+    tab.columnconfigure(0, weight=1)
+    ttk.Label(tab, text="Добавь в TLauncher любую сборку — папку или архив (CurseForge, Modrinth, "
+                        "MultiMC/Prism или просто папку с модами). Загрузчик и недостающие моды "
+                        "лаунчер скачает сам.", wraplength=330, foreground="gray").grid(row=0, sticky="w")
+    pick_row = ttk.Frame(tab)
+    pick_row.grid(row=1, pady=(8, 0), sticky="we")
+    pick_row.columnconfigure((0, 1), weight=1, uniform="pick")
+    pick_dir = ttk.Button(pick_row, text="Выбрать папку…")
+    pick_dir.grid(column=0, row=0, sticky="we", padx=(0, 3))
+    pick_zip = ttk.Button(pick_row, text="Выбрать архив…")
+    pick_zip.grid(column=1, row=0, sticky="we", padx=(3, 0))
+
+    # Что нашли в сборке; всё можно поправить перед установкой
+    box = ttk.LabelFrame(tab, text="Сборка", padding=8)
+    box.grid(row=2, pady=(10, 0), sticky="we")
+    box.columnconfigure(1, weight=1)
+    name_var, mc_var, loader_var, lver_var = tk.StringVar(), tk.StringVar(), tk.StringVar(), tk.StringVar()
+    mode_var, auto_var = tk.StringVar(value="auto"), tk.StringVar()
+    ttk.Label(box, text="Название:").grid(column=0, row=0, sticky="w", pady=2)
+    name_entry = ttk.Entry(box, textvariable=name_var)
+    name_entry.grid(column=1, row=0, sticky="we", padx=(6, 0), pady=2)
+
+    # Версия игры: авто — подобрал лаунчер, вручную — из списка всех версий
+    ttk.Label(box, text="Minecraft:").grid(column=0, row=1, sticky="nw", pady=(4, 2))
+    ver = ttk.Frame(box)
+    ver.grid(column=1, row=1, sticky="we", padx=(6, 0), pady=2)
+    ver.columnconfigure(1, weight=1)
+    auto_rb = ttk.Radiobutton(ver, text="Авто:", variable=mode_var, value="auto")
+    auto_rb.grid(column=0, row=0, sticky="w")
+    ttk.Label(ver, textvariable=auto_var, wraplength=200).grid(column=1, row=0, sticky="w", padx=(4, 0))
+    manual_rb = ttk.Radiobutton(ver, text="Вручную:", variable=mode_var, value="manual")
+    manual_rb.grid(column=0, row=1, sticky="w", pady=(4, 0))
+    mc_box = ttk.Combobox(ver, textvariable=mc_var, state="readonly", width=12, height=15)
+    mc_box.grid(column=1, row=1, sticky="w", padx=(4, 0), pady=(4, 0))
+
+    ttk.Label(box, text="Загрузчик:").grid(column=0, row=2, sticky="w", pady=2)
+    loader_row = ttk.Frame(box)
+    loader_row.grid(column=1, row=2, sticky="we", padx=(6, 0), pady=2)
+    loader_row.columnconfigure(1, weight=1)
+    names = [custom_packs.LOADER_NAMES[l] for l in custom_packs.LOADERS]
+    loader_box = ttk.Combobox(loader_row, textvariable=loader_var, values=names, state="readonly", width=10)
+    loader_box.grid(column=0, row=0)
+    lver = ttk.Combobox(loader_row, textvariable=lver_var, state="readonly", width=14, height=15)
+    lver.grid(column=1, row=0, sticky="we", padx=(6, 0))
+    fields = [name_entry, auto_rb, manual_rb, mc_box, loader_box, lver]
+    AUTO_LOADER = "авто (последняя)"
+    fit_var = tk.StringVar()
+    ttk.Label(ver, textvariable=fit_var, foreground="#c62828", wraplength=230).grid(column=0, row=2, columnspan=2, sticky="w")
+    info_var = tk.StringVar(value="Выбери папку или архив со сборкой.")
+    ttk.Label(box, textvariable=info_var, wraplength=310, foreground="gray").grid(column=0, row=3, columnspan=2, sticky="w", pady=(6, 0))
+    add = ttk.Button(box, text="Добавить в TLauncher")
+    add.grid(column=0, row=4, columnspan=2, sticky="we", pady=(8, 0))
+    bar = ttk.Progressbar(tab, maximum=1.0)
+    bar.grid(row=3, pady=(10, 2), sticky="we")
+    status_var = tk.StringVar()
+    ttk.Label(tab, textvariable=status_var, wraplength=330).grid(row=4, sticky="w")
+
+    mine = ttk.LabelFrame(tab, text="Мои сборки", padding=8)
+    mine.grid(row=5, pady=(10, 0), sticky="we")
+    mine.columnconfigure((0, 1), weight=1, uniform="mine")
+    listbox = tk.Listbox(mine, height=4, activestyle="none")
+    listbox.grid(column=0, row=0, columnspan=2, sticky="we")
+    open_btn = ttk.Button(mine, text="Открыть папку")
+    open_btn.grid(column=0, row=1, sticky="we", padx=(0, 3), pady=(6, 0))
+    remove_btn = ttk.Button(mine, text="Убрать из TLauncher")
+    remove_btn.grid(column=1, row=1, sticky="we", padx=(3, 0), pady=(6, 0))
+
+    plan = {}
+
+    def set_busy(busy: bool):
+        for w in (pick_dir, pick_zip):
+            w.state(["disabled"] if busy else ["!disabled"])
+        for w in (add, *fields):
+            w.state(["disabled"] if busy or not plan else ["!disabled"])
+        if not busy and plan:
+            loader_box.state(["readonly"])
+            lver.state(["readonly"])
+            mc_box.state(["readonly"] if mode_var.get() == "manual" else ["disabled"])
+
+    def current_mc():
+        return mc_var.get() if mode_var.get() == "manual" else plan.get("minecraft")
+
+    def current_loader():
+        return next(k for k, v in custom_packs.LOADER_NAMES.items() if v == loader_var.get())
+
+    def refresh_loader_versions(*_):
+        # Список версий загрузчика под выбранную версию игры
+        if not plan:
+            return
+        loader, mc = current_loader(), current_mc()
+        # Предупреждение, если на выбранной вручную версии часть модов не запустится
+        specs = plan.get("mod_specs") or []
+        fits = custom_packs.fit_count(specs, mc) if specs and mc else len(specs)
+        fit_var.set(f"На {mc} подойдут модов: {fits} из {len(specs)}" if fits < len(specs) else "")
+        if loader == "vanilla":
+            lver.configure(values=[])
+            lver_var.set("—")
+            return
+        lver_var.set("загружаю…")
+        threading.Thread(target=loader_versions_worker, args=(loader, mc), daemon=True).start()
+
+    def loader_versions_worker(loader, mc):
+        try:
+            versions = custom_packs.loader_versions(loader, mc)
+        except Exception:
+            versions = None  # нет сети — оставим только «авто»
+        ui(loader_versions_done, loader, mc, versions)
+
+    def loader_versions_done(loader, mc, versions):
+        if (loader, mc) != (current_loader(), current_mc()):
+            return  # пока грузили, игрок уже выбрал другое
+        if versions == []:
+            lver.configure(values=[])
+            lver_var.set(f"нет для {mc}")
+            return
+        lver.configure(values=[AUTO_LOADER] + (versions or []))
+        detected = plan.get("loader_version")
+        same = loader == plan["loader"] and mc == plan["minecraft"]
+        lver_var.set(detected if same and detected else AUTO_LOADER)
+
+    def on_mode():
+        if mode_var.get() == "manual" and not mc_var.get():
+            mc_var.set(plan.get("minecraft") or "")
+        set_busy(False)
+        refresh_loader_versions()
+
+    def refresh_list():
+        listbox.delete(0, "end")
+        for p in custom_profiles():
+            loader = custom_packs.LOADER_NAMES.get(p["loader"], p["loader"])
+            listbox.insert("end", f"{p['name']} — {p['minecraft']}, {loader}")
+
+    def analyzed(result):
+        plan.clear()
+        plan.update(result)
+        name_var.set(result["name"])
+        mode_var.set("auto")
+        auto_var.set(f"{result['minecraft'] or '—'} ({result.get('mc_source', '')})")
+        mc_var.set(result["minecraft"] or "")
+        mc_box.configure(values=result.get("releases") or [])
+        loader_var.set(custom_packs.LOADER_NAMES[result["loader"]])
+        kinds = {"curseforge": "CurseForge", "modrinth": "Modrinth", "multimc": "MultiMC/Prism", "folder": "папка с модами"}
+        parts = [kinds[result["format"]], f"модов: {result['mods']}"]
+        if result["downloads"]:
+            parts.append(f"докачать файлов: {len(result['downloads'])}")
+        if result["missing"]:
+            parts.append(f"не хватает зависимостей: {len(result['missing'])} (найду на Modrinth)")
+        info_var.set(" · ".join(parts) + ("\n" + " ".join(result["notes"]) if result["notes"] else ""))
+        status_var.set("Проверь данные и нажми «Добавить в TLauncher».")
+        bar.configure(value=0)
+        set_busy(False)
+        refresh_loader_versions()
+
+    def analyze_worker(path: Path):
+        try:
+            ui(analyzed, custom_packs.analyze(path, status=lambda s: ui(status_var.set, s)))
+        except Exception as e:
+            traceback.print_exc()
+            ui(messagebox.showerror, APP_NAME, f"Не удалось разобрать сборку:\n\n{e}")
+            ui(status_var.set, "")
+            ui(set_busy, False)
+
+    def choose(path):
+        if path:
+            plan.clear()
+            set_busy(True)
+            info_var.set(Path(path).name)
+            threading.Thread(target=analyze_worker, args=(Path(path),), daemon=True).start()
+
+    def install_worker(chosen: dict):
+        try:
+            res = custom_packs.install(chosen, mc_dir, status=lambda s: ui(status_var.set, s),
+                                       progress=lambda v: ui(bar.configure, {"value": v}))
+            profiles = [p for p in custom_profiles() if p["version_id"] != res["version_id"]] + [
+                {k: res[k] for k in ("name", "version_id", "game_dir", "minecraft", "loader", "loader_version")}]
+            save_custom_profiles(profiles)
+            text = f"Готово! В TLauncher выбери версию «{res['version_id']}» и нажми «Войти в игру»."
+            if chosen["mods"] > 150:
+                text += "\n\nСборка большая — выдели в настройках TLauncher не меньше 6 ГБ памяти."
+            if res["notes"]:
+                text += "\n\n" + "\n".join(res["notes"])
+            ui(refresh_list)
+            ui(status_var.set, f"Готово: «{res['version_id']}» добавлена в TLauncher.")
+            ui(messagebox.showinfo, APP_NAME, text)
+        except Exception as e:
+            traceback.print_exc()
+            ui(messagebox.showerror, APP_NAME, f"Не удалось добавить сборку:\n\n{e}")
+            ui(status_var.set, "Ошибка, попробуй ещё раз")
+        ui(set_busy, False)
+
+    def on_add():
+        loader, mc = current_loader(), current_mc()
+        if not mc or not name_var.get().strip():
+            messagebox.showwarning(APP_NAME, "Заполни название и выбери версию Minecraft.")
+            return
+        lv = lver_var.get()
+        if lv.startswith("нет для"):
+            messagebox.showwarning(APP_NAME, f"{loader_var.get()} для Minecraft {mc} не существует — выбери другую версию.")
+            return
+        if lv == "загружаю…":
+            return
+        if lv in (AUTO_LOADER, "—"):
+            lv = None
+        chosen = {**plan, "name": name_var.get().strip(), "minecraft": mc, "loader": loader, "loader_version": lv}
+        set_busy(True)
+        bar.configure(value=0)
+        threading.Thread(target=install_worker, args=(chosen,), daemon=True).start()
+
+    def selected():
+        sel = listbox.curselection()
+        return custom_profiles()[sel[0]] if sel else None
+
+    def on_open():
+        p = selected()
+        if p and Path(p["game_dir"]).exists():
+            os.startfile(p["game_dir"])
+
+    def on_remove():
+        p = selected()
+        if not p:
+            return
+        if not messagebox.askyesno(APP_NAME, f"Убрать версию «{p['version_id']}» из TLauncher?\n\n"
+                                             f"Папка игры с мирами и настройками останется:\n{p['game_dir']}"):
+            return
+        try:
+            custom_packs.remove(p, mc_dir)
+        except OSError as e:
+            messagebox.showerror(APP_NAME, f"Не удалось удалить версию:\n\n{e}")
+            return
+        save_custom_profiles([x for x in custom_profiles() if x["version_id"] != p["version_id"]])
+        refresh_list()
+
+    pick_dir.configure(command=lambda: choose(filedialog.askdirectory(title="Папка со сборкой")))
+    pick_zip.configure(command=lambda: choose(filedialog.askopenfilename(
+        title="Архив со сборкой", filetypes=[("Сборка", "*.zip *.mrpack"), ("Все файлы", "*.*")])))
+    add.configure(command=on_add)
+    auto_rb.configure(command=on_mode)
+    manual_rb.configure(command=on_mode)
+    mc_box.bind("<<ComboboxSelected>>", refresh_loader_versions)
+    loader_box.bind("<<ComboboxSelected>>", refresh_loader_versions)
+    open_btn.configure(command=on_open)
+    remove_btn.configure(command=on_remove)
+    set_busy(False)
+    refresh_list()
+
+
 def run_gui() -> None:
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
@@ -505,11 +770,16 @@ def run_gui() -> None:
         root.iconbitmap(str(RESOURCES / "icon.ico"))
     except tk.TclError:
         pass
-    frm = ttk.Frame(root, padding=16)
-    frm.grid()
+    head = ttk.Frame(root, padding=(16, 12, 16, 4))
+    head.grid(sticky="we")
+    head.columnconfigure(0, weight=1)
+    ttk.Label(head, text="MineSerc", font=("Segoe UI", 18, "bold")).grid(column=0, row=0, pady=(0, 2))
+    ttk.Label(head, text="Сборки и версии для TLauncher").grid(column=0, row=1)
+    tabs = ttk.Notebook(root, padding=(12, 6, 12, 12))
+    tabs.grid(sticky="nswe")
+    frm = ttk.Frame(tabs, padding=10)
+    tabs.add(frm, text="Наши серверы")
 
-    ttk.Label(frm, text="MineSerc", font=("Segoe UI", 18, "bold")).grid(column=0, row=0, pady=(0, 4))
-    ttk.Label(frm, text="Обновление модов и версии для TLauncher").grid(column=0, row=1, pady=(0, 8))
     servers = ttk.LabelFrame(frm, text="Серверы", padding=8)
     servers.grid(column=0, row=2, pady=(0, 10), sticky="we")
     servers.columnconfigure(1, weight=1)
@@ -547,6 +817,8 @@ def run_gui() -> None:
 
     def ui(fn, *a):
         root.after(0, fn, *a)
+
+    custom_tab(tabs, ui, probe.mc_dir)
 
     def show_servers(entries, statuses):
         # Индикатор: какой сервер сейчас включён и доступно ли облако со сборками
