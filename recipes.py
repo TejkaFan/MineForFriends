@@ -20,8 +20,8 @@ from pathlib import Path
 import requests
 
 import custom_packs
+import relay
 
-WORKER = "https://mineforfriends-skins.inkiandmelon.workers.dev"
 RAW = "https://raw.githubusercontent.com/TejkaFan/MineForFriends-skins/main/recipes/"
 CONTENT_DIRS = ("mods", "resourcepacks", "shaderpacks")
 # Что из папки игры уходит в архив конфигов. Миры, скриншоты, логи и options.txt — личное
@@ -119,7 +119,7 @@ def submit(profile: dict, scanned: dict, name: str, description: str, nick: str,
     if scanned["zip"]:
         body += b"\n" + base64.b64encode(scanned["zip"])
     try:
-        r = custom_packs.web.post(f"{WORKER}/recipe", data=body, timeout=120,
+        r = relay.post("/recipe", data=body, timeout=120,
                                   headers={"X-Nick": nick, "X-Token": token, "Content-Type": "text/plain; charset=utf-8"})
     except requests.RequestException as e:
         raise RuntimeError(f"Нет связи с сервером сборок. Проверь интернет.\n\n{e}") from None
@@ -144,7 +144,7 @@ def fetch(recipe_ref: dict) -> dict:
 def listing() -> list:
     """Принятые рецепты: [{id, name, author, description, minecraft, loader, mods, missing, files, updated}]."""
     try:
-        r = custom_packs.web.get(f"{WORKER}/recipes", timeout=15)
+        r = relay.get("/recipes", timeout=15)
         r.raise_for_status()
         refs = r.json()["recipes"]
     except (requests.RequestException, ValueError, KeyError) as e:

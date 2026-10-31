@@ -19,11 +19,14 @@ from pathlib import Path
 
 import requests
 
-REPORT_URL = "https://mineforfriends-skins.inkiandmelon.workers.dev/report"
+import relay
+
 LOG_LIMIT = 512 * 1024
 LOG_TAIL = 150
 REPEAT_AFTER = 24 * 60 * 60
 MAX_TEXT = 50_000
+# Worker принимает до 65 536 символов JSON; держим запас на заголовок и служебные поля
+MAX_PACKED = 60_000
 
 config = {"dir": None, "version": "?", "build": "?"}
 
@@ -133,9 +136,17 @@ def send(kind: str, title: str, text: str, sig: str, auto: bool = True) -> str:
         body = body[:MAX_TEXT // 2] + "\n…\n" + body[-MAX_TEXT // 2:]
     payload = {"kind": kind, "title": scrub(title)[:100], "signature": sig, "version": config["version"],
                "build": config["build"], "os": platform.platform(), "text": body}
+    # ensure_ascii=False: иначе каждая русская буква превращается в \uXXXX и отчёт раздувается в 6 раз.
+    # Worker считает длину уже упакованного JSON, а в нём каждый «\» пути и перенос строки — два символа,
+    # поэтому ужимаем середину отчёта, пока он не влезет с запасом
+    data = json.dumps(payload, ensure_ascii=False)
+    while len(data) > MAX_PACKED and len(payload["text"]) > 2000:
+        text = payload["text"]
+        keep = max(1000, len(text) * MAX_PACKED // len(data) // 2 - 200)
+        payload["text"] = text[:keep] + "\n…\n" + text[-keep:]
+        data = json.dumps(payload, ensure_ascii=False)
     try:
-        # ensure_ascii=False: иначе каждая русская буква превращается в \uXXXX и отчёт раздувается в 6 раз
-        r = requests.post(REPORT_URL, data=json.dumps(payload, ensure_ascii=False).encode(),
+        r = relay.post("/report", data=data.encode(),
                           headers={"Content-Type": "application/json; charset=utf-8"}, timeout=15)
         message = r.json().get("message") or f"Ошибка сервера ({r.status_code})"
         print(f"Отчёт [{sig}]: {r.status_code} {message}")

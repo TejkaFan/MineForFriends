@@ -34,6 +34,7 @@ import crashes
 import friends
 import mod_updates
 import recipes
+import relay
 import reports
 import screenshots
 import server_admin
@@ -41,7 +42,7 @@ import server_host
 import share
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.9.5"
+APP_VERSION = "0.9.6"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -84,8 +85,6 @@ GITHUB_RELEASES = "https://api.github.com/repos/TejkaFan/MineForFriends/releases
 RELEASES_CACHE = SETTINGS_FILE.parent / "releases.json"
 # Скины: читает их CustomSkinLoader прямо с GitHub, а загружает Cloudflare Worker (skins-worker/)
 SKINS_ROOT = "https://raw.githubusercontent.com/TejkaFan/MineForFriends-skins/main/skins/"
-SKINS_UPLOAD = "https://mineforfriends-skins.inkiandmelon.workers.dev/upload"
-SKINS_CAPE = "https://mineforfriends-skins.inkiandmelon.workers.dev/cape"
 # Внутри exe ресурсы лежат во временной папке PyInstaller
 RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 
@@ -472,7 +471,7 @@ class Updater:
         headers = {"X-Nick": nick, "X-Token": token, "X-Model": "slim" if slim else "default",
                    "Content-Type": "image/png"}
         try:
-            r = web.post(SKINS_UPLOAD if kind == "skin" else SKINS_CAPE, data=data, headers=headers, timeout=30)
+            r = relay.post("/upload" if kind == "skin" else "/cape", data=data, headers=headers, timeout=30)
         except requests.RequestException as e:
             raise RuntimeError("Нет связи с сервером скинов. Проверь интернет.\n\n" + str(e)) from None
         try:

@@ -7,6 +7,10 @@
     GET  /skins/<ник>.json        профиль {"username", "skins": {"default"|"slim": <хэш>}}
     GET  /skins/textures/<хэш>    PNG скина
     POST /skins/upload            тело — PNG; заголовки X-Nick, X-Token, X-Model (default|slim)
+
+Пересылка в Worker (для друзей, у которых провайдер обрывает соединение с Cloudflare):
+    POST /relay/upload | /relay/cape | /relay/report | /relay/recipe, GET /relay/recipes
+Только из сети Radmin (26.x.x.x) и с этого компьютера.
 Первый, кто загрузил скин на ник, задаёт его токен; дальше менять скин этого ника можно
 только с тем же токеном. Сбросить ник: удалить его строку из skin_tokens.json.
 """
@@ -17,6 +21,8 @@ import re
 import socket
 import sys
 import threading
+import urllib.error
+import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -31,6 +37,12 @@ NICK_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
 MAX_SKIN = 1 << 20
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 skins_lock = threading.Lock()
+
+# Пересылка в Worker: только эти маршруты и заголовки
+WORKER = "https://mineforfriends-skins.inkiandmelon.workers.dev"
+RELAY_ROUTES = {("POST", "/upload"), ("POST", "/cape"), ("POST", "/report"), ("POST", "/recipe"), ("GET", "/recipes")}
+RELAY_HEADERS = ("X-Nick", "X-Token", "X-Model", "Content-Type")
+RELAY_MAX = 8 << 20
 
 
 def png_size(data: bytes):
@@ -90,7 +102,52 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
+    # ---- Пересылка в Worker для друзей, у которых провайдер обрывает соединение с Cloudflare
+
+    def relay(self, method: str) -> bool:
+        route = self.path.split("?", 1)[0]
+        if not route.startswith("/relay/"):
+            return False
+        target = route[len("/relay"):]
+        if (method, target) not in RELAY_ROUTES:
+            self.reply(404, "Нет такого адреса")
+            return True
+        # Только своим: сеть Radmin и этот компьютер. Иначе облако стало бы открытым прокси
+        if not (self.client_address[0].startswith("26.") or self.client_address[0] == "127.0.0.1"):
+            self.reply(403, "Пересылка только для друзей по Radmin")
+            return True
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > RELAY_MAX:
+            self.reply(413, "Слишком большой запрос")
+            return True
+        body = self.rfile.read(length) if length else None
+        headers = {k: self.headers[k] for k in RELAY_HEADERS if self.headers.get(k)}
+        headers["User-Agent"] = "MineForFriends-cloud-relay"
+        request = urllib.request.Request(WORKER + target, data=body, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=120) as r:
+                status, data, kind = r.status, r.read(), r.headers.get("Content-Type", "application/json")
+        except urllib.error.HTTPError as e:
+            status, data, kind = e.code, e.read(), e.headers.get("Content-Type", "application/json")
+        except OSError as e:
+            self.reply(502, f"Облако хоста не достучалось до сервера скинов: {e}")
+            return True
+        self.send_response(status)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-MFF-Relay", "1")
+        self.end_headers()
+        self.wfile.write(data)
+        self.log_message("пересылка %s %s -> %s", method, target, status)
+        return True
+
+    def do_GET(self):
+        if not self.relay("GET"):
+            super().do_GET()
+
     def do_POST(self):
+        if self.relay("POST"):
+            return
         if self.path != "/skins/upload":
             self.send_error(404)
             return
