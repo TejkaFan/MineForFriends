@@ -183,6 +183,7 @@ function renderServers(d) {
       ${who}
       <div class="fill"><div style="width:${fill}%"></div></div>
       <div class="pick"><span class="tick">${icon("check")}</span>${on ? "Ставится и обновляется" : "Не ставится"}
+        ${p.kind === "own" ? "" : `<button class="mem" data-check="${esc(p.id)}" title="Проверить связь с сервером">${icon("wifi")}</button>`}
         <button class="mem" data-mem="${esc(p.id)}" title="Память для игры в этой сборке">${icon("cpu")}${p.memory} ГБ</button></div>
     </div>`;
   }).join("");
@@ -385,6 +386,7 @@ async function loadProfiles() {
       <div class="tools">
         <button class="iconbtn go" data-act="play" data-i="${i}" title="Играть: выставит память и откроет TLauncher">${icon("player-play")}</button>
         <button class="iconbtn" data-act="memory" data-i="${i}" title="Память для игры">${icon("cpu")}</button>
+        ${p.loader === "vanilla" ? "" : `<button class="iconbtn" data-act="updates" data-i="${i}" title="Обновить моды с Modrinth">${icon("refresh")}</button>`}
         <button class="iconbtn" data-act="share" data-i="${i}" title="Поделиться сборкой с друзьями">${icon("share")}</button>
         <button class="iconbtn" data-act="open" data-i="${i}" title="Открыть папку игры">${icon("folder")}</button>
         <button class="iconbtn del" data-act="remove" data-i="${i}" title="Убрать из TLauncher">${icon("trash")}</button>
@@ -508,6 +510,7 @@ async function profileAction(act, p) {
   if (act === "open") return api().open_folder(p.game_dir);
   if (act === "memory") return memoryDialog(`custom:${p.version_id}`, p.name);
   if (act === "share") return shareRecipe(p);
+  if (act === "updates") return modUpdates(p);
   if (act === "play") {
     try {
       return showInfo("Готово", await api().play_custom(p.version_id));
@@ -523,6 +526,64 @@ async function profileAction(act, p) {
     showError("Не удалось удалить версию:\n\n" + errText(e));
   }
   loadProfiles();
+}
+
+// Обновление модов: список с галочками, бета и альфа по умолчанию не отмечены
+async function modUpdates(p) {
+  if (state.busy) return;
+  let list = [];
+  const done = dialog({title: `Обновления модов — ${p.name}`, html: '<div class="muted">Ищу обновления на Modrinth…</div>', wide: true,
+    buttons: [{label: "Отмена", value: null}, {label: "Обновить выбранные", value: "go", primary: true, check: () => {
+      const picked = $$("#modal-body input[data-u]:checked").map(x => +x.dataset.u);
+      if (!list.length) return false;
+      if (!picked.length) {
+        $("#upd-err").textContent = "Отметь хотя бы один мод.";
+        return false;
+      }
+      state.updatesPicked = picked;
+      return true;
+    }}]});
+  try {
+    const r = await api().mod_updates(p.version_id);
+    list = r.updates;
+    const kind = {beta: "бета", alpha: "альфа"};
+    $("#modal-body").innerHTML = list.length ? `
+      <div class="upd-head"><label class="check"><input type="checkbox" id="upd-all"><span>Все</span></label>
+        <span class="muted small">Можно обновить ${list.length} из ${r.mods} модов${r.found < r.mods ? ` · ${r.mods - r.found} не с Modrinth, их не проверить` : ""}</span></div>
+      <div class="list upd-list">${list.map((u, i) => `<label class="item upd">
+          <input type="checkbox" data-u="${i}"${u.type === "release" ? " checked" : ""}>
+          <div class="grow"><div class="name">${esc(u.title)}${kind[u.type] ? ` <span class="tag">${kind[u.type]}</span>` : ""}</div>
+            <div class="meta">${esc(u.from)} → <b>${esc(u.to)}</b></div></div></label>`).join("")}</div>
+      <div class="hint">Старые версии модов сохранятся — если что-то сломается, их можно вернуть. Бета и альфа — тестовые версии, они не отмечены.</div>
+      <div class="line" id="upd-err"></div>`
+      : `<div class="empty">Все моды свежие${r.found < r.mods ? `.<br><span class="muted small">${r.mods - r.found} из ${r.mods} модов не с Modrinth — их лаунчер проверить не может.</span>` : "."}</div>`;
+    const all = $("#upd-all");
+    if (all) {
+      const sync = () => {
+        const boxes = $$("#modal-body input[data-u]");
+        all.checked = boxes.every(b => b.checked);
+        all.indeterminate = !all.checked && boxes.some(b => b.checked);
+      };
+      all.onchange = () => $$("#modal-body input[data-u]").forEach(b => { b.checked = all.checked; });
+      $$("#modal-body input[data-u]").forEach(b => b.onchange = sync);
+      sync();
+    }
+  } catch (e) {
+    $("#modal-body").innerHTML = `<div class="hint">${esc(errText(e))}</div>`;
+  }
+  if (await done !== "go") return;
+  state.busy = true;
+  setStatus("custom", "Обновляю моды…");
+  setProgress("custom", 0);
+  try {
+    const text = await api().apply_mod_updates(p.version_id, state.updatesPicked);
+    setStatus("custom", "Моды обновлены");
+    showInfo("Моды обновлены", text);
+  } catch (e) {
+    setStatus("custom", "Ошибка, попробуй ещё раз");
+    showError("Не удалось обновить моды:\n\n" + errText(e));
+  }
+  state.busy = false;
 }
 
 // ---------- Сервер ----------
@@ -546,6 +607,7 @@ async function loadServerTab() {
         <button class="iconbtn" data-act="console" data-i="${i}" title="Консоль: лог и команды">${icon("terminal-2")}</button>
         <button class="iconbtn" data-act="players" data-i="${i}" title="Игроки, белый список, операторы">${icon("users")}</button>
         <button class="iconbtn" data-act="stats" data-i="${i}" title="Статистика: кто сколько играл">${icon("chart-bar")}</button>
+        <button class="iconbtn" data-act="load" data-i="${i}" title="Нагрузка: TPS, память, процессор">${icon("activity")}</button>
         <button class="iconbtn" data-act="backups" data-i="${i}" title="Бэкапы мира: сделать и восстановить">${icon("device-floppy")}</button>
         <button class="iconbtn" data-act="settings" data-i="${i}" title="Настройки">${icon("settings")}</button>
         <button class="iconbtn" data-act="folder" data-i="${i}" title="Папка сервера">${icon("folder")}</button>
@@ -624,10 +686,17 @@ async function serverPlayers(s) {
     const chips = (names, act) => names.length
       ? names.map(n => `<span class="chip-name">${esc(n)}<button data-act="${act}" data-name="${esc(n)}" title="Убрать">×</button></span>`).join("")
       : `<span class="muted">пусто</span>`;
+    const isOp = n => d.ops.some(o => o.toLowerCase() === n.toLowerCase());
+    // Кик и бан — со вторым нажатием: первое только спрашивает «Точно?»
+    const onlineRow = n => `<div class="pl-row"><span class="grow">${esc(n)}${isOp(n) ? ` <span class="tag">оператор</span>` : ""}</span>
+        <button class="iconbtn" data-act="${isOp(n) ? "deop" : "op"}" data-name="${esc(n)}" title="${isOp(n) ? "Снять оператора" : "Сделать оператором"}">${icon("crown")}</button>
+        <button class="iconbtn" data-act="kick" data-confirm="1" data-name="${esc(n)}" title="Кикнуть (сможет зайти снова)">${icon("door-exit")}</button>
+        <button class="iconbtn del" data-act="ban" data-confirm="1" data-name="${esc(n)}" title="Забанить">${icon("ban")}</button></div>`;
     body.innerHTML = `
-      <div class="pl-sec"><h4>Сейчас на сервере</h4>
+      <div class="hint pl-err" id="pl-err">${d.running ? "" : "Сервер выключен: изменения применятся при следующем запуске."}</div>
+      <div class="pl-sec"><h4>Сейчас на сервере${d.running && d.online.length ? ` (${d.online.length})` : ""}</h4>
         ${!d.running ? `<span class="muted">сервер выключен</span>` : d.online.length
-          ? d.online.map(n => `<span class="chip-name">${esc(n)}<button data-act="kick" data-name="${esc(n)}" title="Кикнуть">×</button></span>`).join("")
+          ? `<div class="pl-list">${d.online.map(onlineRow).join("")}</div>`
           : `<span class="muted">никого</span>`}</div>
       <div class="pl-sec"><h4>Белый список</h4>
         <label class="check"><input type="checkbox" id="wl-on" ${d.whitelist_on ? "checked" : ""}><span>Пускать только игроков из списка</span></label>
@@ -636,7 +705,10 @@ async function serverPlayers(s) {
       <div class="pl-sec"><h4>Операторы (админы)</h4>
         <div class="chips">${chips(d.ops, "deop")}</div>
         <div class="row2"><input id="op-name" maxlength="16" placeholder="Ник"><button class="btn" data-act="op">Сделать оператором</button></div></div>
-      <div class="hint" id="pl-err">${d.running ? "" : "Сервер выключен: изменения применятся при следующем запуске."}</div>`;
+      <div class="pl-sec"><h4>Забаненные</h4>
+        <div class="chips">${d.banned.length ? d.banned.map(n => `<span class="chip-name">${esc(n)}<button data-act="pardon" data-name="${esc(n)}" title="Разбанить">×</button></span>`).join("") : `<span class="muted">никого</span>`}</div>
+        <div class="row2"><input id="ban-name" maxlength="16" placeholder="Ник"><button class="btn" data-act="ban" data-confirm="1">Забанить</button></div></div>
+`;
     $("#wl-on", body).onchange = e => act(e.target.checked ? "whitelist_on" : "whitelist_off");
   };
   const act = async (action, name = "") => {
@@ -652,10 +724,217 @@ async function serverPlayers(s) {
   $("#modal-body").onclick = e => {
     const b = e.target.closest("button[data-act]");
     if (!b) return;
-    const input = b.dataset.act === "whitelist_add" ? $("#wl-name") : b.dataset.act === "op" ? $("#op-name") : null;
-    act(b.dataset.act, input ? input.value : b.dataset.name);
+    const input = b.dataset.name ? null : {whitelist_add: "#wl-name", op: "#op-name", ban: "#ban-name"}[b.dataset.act];
+    const name = input ? $(input).value.trim() : b.dataset.name;
+    if (b.dataset.confirm && !b.classList.contains("sure")) {
+      if (!name) return act(b.dataset.act, name); // пустой ник — пусть сервер лаунчера объяснит
+      b.classList.add("sure");
+      $("#pl-err").textContent = `${b.dataset.act === "ban" ? "Забанить" : "Кикнуть"} ${name}? Нажми ещё раз, чтобы подтвердить.`;
+      setTimeout(() => b.classList.remove("sure"), 4000);
+      return;
+    }
+    act(b.dataset.act, name);
   };
   await render();
+  await done;
+}
+
+// Нагрузка: замер раз в 2 секунды, графики за последние 5 минут, пока окно открыто
+const LOAD_POINTS = 150;
+const gb = bytes => (bytes / 2 ** 30).toFixed(1);
+
+function loadChart(values, max) {
+  // Один ряд на график, шкала от нуля; линия 2px и лёгкая заливка под ней
+  const W = 300, H = 64, n = values.length;
+  if (n < 2) return `<svg class="ld-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"></svg>`;
+  // Пока данных меньше минуты, график растянут на всю ширину, дальше — окно в 5 минут
+  const span = Math.max(n, 30);
+  const x = i => (W * (span - n + i) / (span - 1)).toFixed(1);
+  const y = v => (H - 2 - (H - 4) * Math.min(1, (v ?? 0) / max)).toFixed(1);
+  const pts = values.map((v, i) => `${x(i)},${y(v)}`).join(" ");
+  return `<svg class="ld-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" data-max="${max}">
+      <line class="ld-grid" x1="0" x2="${W}" y1="${H / 2}" y2="${H / 2}"/>
+      <polygon class="ld-area" points="${x(0)},${H} ${pts} ${x(n - 1)},${H}"/>
+      <polyline class="ld-line" points="${pts}"/>
+      <line class="ld-cross hidden" y1="0" y2="${H}"/></svg>`;
+}
+
+async function serverLoad(s) {
+  const hist = {tps: [], players: [], memory: [], cpu: []};
+  let open = true;
+  const html = `<div class="ld-grid4" id="ld-tiles"><div class="muted">Замеряю…</div></div>
+    <div class="hint" id="ld-note"></div>`;
+  const done = dialog({title: `Нагрузка — ${s.name}`, html, wide: true, buttons: [{label: "Закрыть", value: null, primary: true}]});
+  done.then(() => {
+    open = false;
+    $("#modal-body").onmousemove = $("#modal-body").onmouseleave = null;
+  });
+
+  const tile = (key, label, value, sub, max) => `<div class="ld-tile" data-key="${key}">
+      <div class="ld-label">${label}</div><div class="ld-value">${value}</div><div class="ld-sub">${sub}</div>
+      ${max ? loadChart(hist[key], max) : ""}</div>`;
+  const tpsState = t => t >= 18 ? ["ok", "норма"] : t >= 15 ? ["warn", "подлагивает"] : ["bad", "лагает"];
+  const render = d => {
+    const memMax = d.memory_max || 1;
+    // java.exe берёт сверх выделенного под мир ещё ~20–40% на себя, поэтому шкала с запасом
+    const memScale = Math.max(memMax * 1.5, ...hist.memory.filter(v => v != null)) * 1.05;
+    const maxPlayers = Math.max(4, ...hist.players.filter(v => v != null)) * 1.2;
+    const [cls, word] = d.tps != null ? tpsState(d.tps) : ["", ""];
+    $("#ld-tiles").innerHTML =
+      (d.tps != null
+        ? tile("tps", "TPS", `${d.tps.toFixed(1)}<span class="ld-state ${cls}">${word}</span>`,
+               `тик ${d.mspt} мс · 20 TPS — идеально, ниже 15 заметны лаги`, 20)
+        : tile("tps", "Лаги за 5 минут", `${d.lag}<span class="ld-state ${d.lag ? d.lag > 5 ? "bad" : "warn" : "ok"}">${
+                 d.lag ? d.lag > 5 ? "лагает" : "бывают" : "норма"}</span>`, "сколько раз сервер не успевал", null)) +
+      tile("players", "Игроки онлайн", d.players ?? "—", "сколько человек на сервере", maxPlayers) +
+      tile("memory", "Память java.exe", d.memory != null ? `${gb(d.memory)} ГБ` : "—", `под мир ${gb(memMax)} ГБ + сама Java`, memScale) +
+      tile("cpu", "Процессор", d.cpu != null ? `${d.cpu}%` : "—", "от всего процессора компьютера", 100);
+    const notes = [];
+    if (d.tps == null) notes.push("Точный TPS сервер сообщает на Forge, NeoForge и Minecraft 1.20.3+; здесь лаги считаются по предупреждениям сервера.");
+    else if (d.lag) notes.push(`За последние 5 минут сервер ${d.lag} раз не успевал обрабатывать мир.`);
+    $("#ld-note").textContent = notes.join(" ");
+  };
+
+  // Наведение: вертикальная линия и значение в этой точке
+  $("#modal-body").onmousemove = e => {
+    const svg = e.target.closest(".ld-chart");
+    $$(".ld-cross").forEach(l => l.classList.add("hidden"));
+    $$(".ld-tile .ld-sub").forEach(el => { if (el.dataset.text) { el.textContent = el.dataset.text; delete el.dataset.text; } });
+    if (!svg) return;
+    const key = svg.closest(".ld-tile").dataset.key, values = hist[key], n = values.length;
+    if (n < 2) return;
+    const r = svg.getBoundingClientRect();
+    const span = Math.max(n, 30);
+    const pos = (e.clientX - r.left) / r.width * (span - 1) - (span - n);
+    const i = Math.max(0, Math.min(n - 1, Math.round(pos)));
+    const v = values[i];
+    const cross = $(".ld-cross", svg);
+    const xx = (300 * (span - n + i) / (span - 1)).toFixed(1);
+    cross.setAttribute("x1", xx); cross.setAttribute("x2", xx); cross.classList.remove("hidden");
+    const sub = $(".ld-sub", svg.closest(".ld-tile"));
+    sub.dataset.text = sub.textContent;
+    const ago = (n - 1 - i) * 2;
+    const fmt = {tps: x => `${x.toFixed(1)} TPS`, players: x => `${x} чел.`, memory: x => `${gb(x)} ГБ`, cpu: x => `${x}%`}[key];
+    sub.textContent = `${v == null ? "нет данных" : fmt(v)} · ${ago ? `${ago} с назад` : "сейчас"}`;
+  };
+  $("#modal-body").onmouseleave = () => $("#modal-body").onmousemove({target: document.body});
+
+  while (open) {
+    try {
+      const d = await api().server_load(s.path);
+      if (!open) break;
+      if (!d.running) {
+        $("#ld-tiles").innerHTML = `<div class="muted">Сервер выключен. Запусти его — графики начнутся сами.</div>`;
+        $("#ld-note").textContent = "";
+        for (const k in hist) hist[k].length = 0;
+      } else {
+        for (const k in hist) {
+          hist[k].push(d[k]);
+          if (hist[k].length > LOAD_POINTS) hist[k].shift();
+        }
+        // Пока мышь над графиком, не перерисовываем — иначе подсказка мигает
+        if (!$(".ld-cross:not(.hidden)")) render(d);
+      }
+    } catch (e) {
+      if (!open) break;
+      $("#ld-note").textContent = errText(e);
+    }
+    await wait(2000);
+  }
+}
+
+// ---------- Друзья в сети ----------
+
+state.friends = [];
+
+function renderFriends(list) {
+  state.friends = list;
+  $("#friends-count").textContent = list.length;
+  $("#friends-btn").classList.toggle("some", list.length > 0);
+  if ($("#friends-list")) $("#friends-list").innerHTML = friendsHtml();
+}
+
+function friendStatus(f) {
+  if (f.server) return `на сервере «${esc(f.server)}»`;
+  if (f.playing) return `играет${f.pack ? ` в «${esc(f.pack)}»` : ""}${f.mode ? ` · ${esc(f.mode)}` : ""}`;
+  return "в лаунчере";
+}
+
+function friendsHtml() {
+  if (!state.friends.length) return `<div class="empty">Никого нет в сети.<br><span class="muted small">Друг виден, когда у него
+    открыт лаунчер 0.9.5 или новее и включён Radmin VPN — или когда он играет на одном из серверов в списке.</span></div>`;
+  return state.friends.map((f, i) => `<div class="item fr">
+      <span class="dot${f.playing ? " on" : ""}"></span>
+      <div class="grow"><div class="name">${esc(f.nick)}</div>
+        <div class="meta">${friendStatus(f)}${f.hosting?.length ? ` · держит сервер «${esc(f.hosting[0])}»` : ""}${f.launcher ? "" : " · без лаунчера"}</div></div>
+      ${f.card ? `<button class="btn primary" data-join="${i}">${icon("player-play")}К нему</button>` : ""}
+      ${f.address || f.ip ? `<button class="iconbtn" data-fcheck="${i}" title="Проверить связь">${icon("wifi")}</button>` : ""}
+    </div>`).join("");
+}
+
+async function friendsDialog() {
+  const html = `<div class="list" id="friends-list">${friendsHtml()}</div>
+    <form class="con-row fr-check" id="fr-check-form">
+      <input id="fr-check-addr" placeholder="Проверить связь с адресом, например 26.12.34.56:25565">
+      <button class="btn" type="submit">${icon("wifi")}Проверить</button></form>`;
+  const done = dialog({title: "Друзья в сети", html, wide: true, buttons: [
+    {label: "Обновить", value: null, check: async () => {
+      renderFriends(await api().friends_online());
+      return false;
+    }},
+    {label: "Закрыть", value: null, primary: true}]});
+  $("#fr-check-form").onsubmit = e => {
+    e.preventDefault();
+    const addr = $("#fr-check-addr").value.trim();
+    if (addr) checkDialog(addr, addr);
+  };
+  $("#modal-body").onclick = e => {
+    const join = e.target.closest("[data-join]"), chk = e.target.closest("[data-fcheck]");
+    if (join) {
+      const f = state.friends[join.dataset.join];
+      $("#modal").classList.add("hidden");
+      joinFriend(f);
+    } else if (chk) {
+      const f = state.friends[chk.dataset.fcheck];
+      checkDialog(f.address || f.ip, f.nick);
+    }
+  };
+  await done;
+}
+
+// «К нему»: открываем «Наши серверы» и отмечаем его сервер — останется нажать ИГРАТЬ
+async function joinFriend(f) {
+  go("play");
+  if (!state.selected.includes(f.card)) await toggleCard(f.card);
+  const card = $$("#cards .card").find(c => c.dataset.id === f.card);
+  if (card) {
+    card.scrollIntoView({block: "nearest"});
+    card.classList.add("flash");
+    setTimeout(() => card.classList.remove("flash"), 1600);
+  }
+}
+
+// Проверка связи по шагам: Radmin → компьютер друга → порт → Minecraft
+async function checkDialog(address, name) {
+  const marks = {ok: ["check", "ok"], warn: ["alert-triangle", "warn"], fail: ["x", "bad"], skip: ["minus", "skip"]};
+  const run = async () => {
+    const body = $("#modal-body");
+    body.innerHTML = `<div class="muted">Проверяю ${esc(address)}… это до 10 секунд.</div>`;
+    try {
+      const r = await api().check_connection(address);
+      body.innerHTML = `<div class="ck-list">${r.steps.map(s => `<div class="ck ${marks[s.state][1]}">
+          <span class="ck-ico">${icon(marks[s.state][0])}</span>
+          <div><div class="ck-title">${esc(s.title)}</div><div class="ck-text">${esc(s.text)}</div></div></div>`).join("")}</div>
+        <div class="ck-summary ${r.steps.some(s => s.state === "fail") ? "bad" : "ok"}">${esc(r.summary)}</div>`;
+    } catch (e) {
+      body.innerHTML = `<div class="hint">${esc(errText(e))}</div>`;
+    }
+    return false;
+  };
+  const done = dialog({title: `Связь — ${name}`, html: "", wide: true, buttons: [
+    {label: "Проверить снова", value: null, check: run},
+    {label: "Закрыть", value: null, primary: true}]});
+  run();
   await done;
 }
 
@@ -812,6 +1091,7 @@ async function serverAction(act, s) {
     }
     if (act === "console") await serverConsole(s);
     if (act === "stats") await serverStats(s);
+    if (act === "load") await serverLoad(s);
     if (act === "backups") await serverBackups(s);
     if (act === "players") await serverPlayers(s);
     if (act === "settings") await serverSettings(s.path);
@@ -1088,6 +1368,7 @@ function about() {
     <div class="pl-sec opts">
       <label class="check"><input type="checkbox" data-opt="tray"${i.options.tray ? " checked" : ""}><span>Крестик сворачивает лаунчер в трей (выход — правой кнопкой по значку)</span></label>
       <label class="check"><input type="checkbox" data-opt="notify"${i.options.notify ? " checked" : ""}><span>Уведомлять, когда друг запустил сервер или зашёл на него</span></label>
+      <label class="check"><input type="checkbox" data-opt="presence"${i.options.presence ? " checked" : ""}><span>Показывать друзьям по Radmin, что я в сети и во что играю</span></label>
     </div>
     <div class="credits"><h4 class="px">Credits</h4><div class="kv">${credits}</div></div>`;
   dialog({title: "MineForFriends by TEJKA", html, buttons: [
@@ -1203,6 +1484,7 @@ window.app = {
     if (name === "status") data.scope === "boot" ? ($("#play-hint").textContent = data.text) : setStatus(data.scope, data.text);
     if (name === "progress") setProgress(data.scope, data.value);
     if (name === "servers") renderServers(data);
+    if (name === "friends") renderFriends(data);
     if (name === "tlauncher") showTlauncher(data.installed);
     if (name === "ready") {
       state.ready = true;
@@ -1217,6 +1499,7 @@ function bind() {
   $("#news-btn").onclick = () => changelog();
   $("#about-btn").onclick = about;
   $("#player-chip").onclick = () => go("skin");
+  $("#friends-btn").onclick = friendsDialog;
   $("#win-min").onclick = () => api().minimize();
   $("#win-close").onclick = () => api().close();
   $("#cards").onclick = e => {
@@ -1224,6 +1507,11 @@ function bind() {
     if (mem) {
       const p = state.packs.find(x => x.id === mem.dataset.mem);
       return p && memoryDialog(p.id, p.name, p.size).then(changed => changed && api().refresh_servers());
+    }
+    const check = e.target.closest("[data-check]");
+    if (check) {
+      const p = state.packs.find(x => x.id === check.dataset.check);
+      return p && checkDialog(p.address, p.name);
     }
     const card = e.target.closest(".card");
     if (card) toggleCard(card.dataset.id);

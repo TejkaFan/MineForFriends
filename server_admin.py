@@ -3,12 +3,15 @@
 Сервер работает в своём окне консоли, поэтому команды (stop, list, whitelist, op) лаунчер
 шлёт по RCON — протоколу удалённой консоли Minecraft. RCON включается в server.properties
 со случайным паролем перед каждым запуском из лаунчера (если ещё не включён).
-Когда сервер выключен, белый список и операторы правятся прямо в whitelist.json и ops.json.
+Когда сервер выключен, белый список, операторы и баны правятся прямо в whitelist.json, ops.json
+и banned-players.json.
 """
+import ctypes
 import datetime
 import gzip
 import hashlib
 import json
+import os
 import re
 import secrets
 import shutil
@@ -105,7 +108,8 @@ def players(server: Path, online: bool) -> dict:
         now = [n.strip() for n in names.split(",") if n.strip()]
     return {"online": now, "whitelist_on": props.get("white-list") == "true",
             "whitelist": sorted(p["name"] for p in read_list(server, "whitelist.json") if p.get("name")),
-            "ops": sorted(p["name"] for p in read_list(server, "ops.json") if p.get("name"))}
+            "ops": sorted(p["name"] for p in read_list(server, "ops.json") if p.get("name")),
+            "banned": sorted(p["name"] for p in read_list(server, "banned-players.json") if p.get("name"))}
 
 
 def player_action(server: Path, online: bool, action: str, name: str = "") -> None:
@@ -114,6 +118,7 @@ def player_action(server: Path, online: bool, action: str, name: str = "") -> No
     if online:
         command = {"whitelist_add": f"whitelist add {name}", "whitelist_remove": f"whitelist remove {name}",
                    "op": f"op {name}", "deop": f"deop {name}", "kick": f"kick {name}",
+                   "ban": f"ban {name}", "pardon": f"pardon {name}",
                    "whitelist_on": "whitelist on", "whitelist_off": "whitelist off"}[action]
         rcon(server, command)
         return
@@ -123,10 +128,17 @@ def player_action(server: Path, online: bool, action: str, name: str = "") -> No
         on = "true" if action == "whitelist_on" else "false"
         write_properties(server / "server.properties", {"white-list": on, "enforce-whitelist": on})
         return
-    file, entry = ("whitelist.json", {"uuid": offline_uuid(name), "name": name}) if action.startswith("whitelist") \
-        else ("ops.json", {"uuid": offline_uuid(name), "name": name, "level": 4, "bypassesPlayerLimit": False})
+    if action.startswith("whitelist"):
+        file, entry = "whitelist.json", {"uuid": offline_uuid(name), "name": name}
+    elif action in ("ban", "pardon"):
+        created = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        file, entry = "banned-players.json", {"uuid": offline_uuid(name), "name": name, "created": created,
+                                              "source": "Server", "expires": "forever",
+                                              "reason": "Banned by an operator."}
+    else:
+        file, entry = "ops.json", {"uuid": offline_uuid(name), "name": name, "level": 4, "bypassesPlayerLimit": False}
     items = [p for p in read_list(server, file) if p.get("name", "").lower() != name.lower()]
-    if action in ("whitelist_add", "op"):
+    if action in ("whitelist_add", "op", "ban"):
         items.append(entry)
     (server / file).write_text(json.dumps(items, ensure_ascii=False, indent=2), "utf-8")
 
@@ -321,6 +333,132 @@ def player_stats(server: Path) -> list:
         s["last"] = s["last"].strftime("%d.%m.%Y %H:%M") if s["last"] else ""
         s["seconds"] = int(s["seconds"])
     return result
+
+
+# ---------- Нагрузка ----------
+
+# Forge: «Mean tick time: 1.2 ms», ванилла: «Average time per tick: 1.2ms», NeoForge: «20.0 TPS (1.2 ms/tick)»
+TICK_RE = re.compile(r"(?:Mean tick time|Average time per tick):\s*([\d.,]+)\s*ms|\(([\d.,]+) ms/tick\)", re.I)
+LAG_RE = re.compile(r"Can't keep up!.*?Running (\d+)ms or (\d+) ticks behind")
+
+
+class _MemoryCounters(ctypes.Structure):
+    _fields_ = [("cb", ctypes.c_ulong), ("PageFaultCount", ctypes.c_ulong)] + \
+               [(n, ctypes.c_size_t) for n in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                                               "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                                               "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
+
+
+def port_pid(port: int):
+    """PID процесса, который слушает TCP-порт (у сервера Minecraft это java.exe)."""
+    iphlpapi = ctypes.windll.iphlpapi
+    size = ctypes.c_ulong(0)
+    iphlpapi.GetExtendedTcpTable(None, ctypes.byref(size), False, 2, 3, 0)  # AF_INET, TCP_TABLE_OWNER_PID_LISTENER
+    buf = ctypes.create_string_buffer(size.value + 4096)
+    size.value = len(buf)
+    if iphlpapi.GetExtendedTcpTable(buf, ctypes.byref(size), False, 2, 3, 0) != 0:
+        return None
+    count = struct.unpack_from("<I", buf, 0)[0]
+    for i in range(count):
+        # MIB_TCPROW_OWNER_PID: состояние, адрес, порт (в сетевом порядке), удалённые адрес и порт, pid
+        _, _, lport, _, _, pid = struct.unpack_from("<6I", buf, 4 + i * 24)
+        if socket.ntohs(lport & 0xFFFF) == port:
+            return pid
+    return None
+
+
+def process_usage(pid: int):
+    """(байт памяти, секунд процессорного времени) процесса или None."""
+    k32, psapi = ctypes.windll.kernel32, ctypes.windll.psapi
+    k32.OpenProcess.restype = ctypes.c_void_p
+    h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return None
+    h = ctypes.c_void_p(h)
+    try:
+        mem = _MemoryCounters()
+        mem.cb = ctypes.sizeof(mem)
+        times = [ctypes.c_ulonglong() for _ in range(4)]
+        if not psapi.GetProcessMemoryInfo(h, ctypes.byref(mem), mem.cb) or \
+                not k32.GetProcessTimes(h, *[ctypes.byref(x) for x in times]):
+            return None
+        return mem.WorkingSetSize, (times[2].value + times[3].value) / 1e7
+    finally:
+        k32.CloseHandle(h)
+
+
+def lag_warnings(server: Path, minutes: int = 5) -> int:
+    """Сколько раз за последние минуты сервер писал «Can't keep up!» — работает на любой версии."""
+    path = server / "logs" / "latest.log"
+    try:
+        with path.open("rb") as f:
+            f.seek(max(0, path.stat().st_size - 256 * 1024))
+            lines = f.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return 0
+    now = datetime.datetime.now()
+    count = 0
+    for line in lines:
+        m = LOG_LINE.match(line)
+        if not m or not LAG_RE.search(line):
+            continue
+        t = now.replace(hour=int(m[4]), minute=int(m[5]), second=int(m[6]), microsecond=0)
+        if t > now:
+            t -= datetime.timedelta(days=1)
+        if (now - t).total_seconds() <= minutes * 60:
+            count += 1
+    return count
+
+
+class Monitor:
+    """Замеры нагрузки сервера: TPS и время тика (по RCON), память и процессор java.exe."""
+
+    def __init__(self):
+        self.cpu = {}       # pid -> (время замера, секунды процессора)
+        self.tps_cmd = {}   # путь сервера -> команда, которая отдаёт время тика ("" — такой нет)
+
+    def tick_time(self, server: Path, loader: str):
+        """Среднее время тика в мс или None, если сервер его не сообщает."""
+        key = str(server)
+        if key not in self.tps_cmd:
+            # Forge и NeoForge: «forge tps»; ванилла и Fabric с 1.20.3: «tick query»
+            candidates = {"forge": ["forge tps"], "neoforge": ["neoforge tps", "forge tps"]}.get(loader, [])
+            self.tps_cmd[key] = ""
+            for command in candidates + ["tick query"]:
+                if TICK_RE.search(rcon(server, command)[0]):
+                    self.tps_cmd[key] = command
+                    break
+        if not self.tps_cmd[key]:
+            return None
+        # У Forge сначала строки по каждому миру, итог «Overall» — последний
+        found = TICK_RE.findall(rcon(server, self.tps_cmd[key])[0])
+        return float("".join(found[-1]).replace(",", ".")) if found else None
+
+    def sample(self, server: Path, loader: str, ram_gb: int) -> dict:
+        port = int(read_properties(server / "server.properties").get("server-port") or 25565)
+        pid = port_pid(port)
+        result = {"running": bool(pid), "memory": None, "memory_max": ram_gb * 1024 ** 3, "cpu": None,
+                  "mspt": None, "tps": None, "lag": lag_warnings(server)}
+        if not pid:
+            self.tps_cmd.pop(str(server), None)  # после перезапуска сервер мог смениться
+            return result
+        usage = process_usage(pid)
+        if usage:
+            result["memory"] = usage[0]
+            now = time.monotonic()
+            before = self.cpu.get(pid)
+            self.cpu[pid] = (now, usage[1])
+            if before and now > before[0]:
+                share = (usage[1] - before[1]) / (now - before[0]) / (os.cpu_count() or 1)
+                result["cpu"] = round(min(100.0, 100 * share), 1)
+        try:
+            mspt = self.tick_time(server, loader)
+        except RuntimeError:
+            mspt = None
+        if mspt is not None:
+            result["mspt"] = round(mspt, 1)
+            result["tps"] = round(min(20.0, 1000 / mspt) if mspt > 0 else 20.0, 1)
+        return result
 
 
 # ---------- Автовыключение ----------

@@ -307,3 +307,67 @@ table.stats td.bar i { display: block; height: 6px; border-radius: 3px; backgrou
 #modal-body .kv { margin: 12px 0 6px; }
 .item .meta.wrap { white-space: normal; }
 #recipes-btn { margin-top: 2px; }
+
+/* Игроки: строки онлайн-игроков */
+.pl-list { display: flex; flex-direction: column; gap: 4px; }
+.pl-row { display: flex; align-items: center; gap: 4px; background: var(--line); border-radius: 6px; padding: 2px 4px 2px 10px; }
+.pl-row .tag { font-size: 11px; color: var(--yellow); margin-left: 6px; }
+.iconbtn.sure { background: var(--red-bg); color: var(--red); }
+
+/* Нагрузка сервера */
+.ld-grid4 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ld-tile { background: var(--line); border-radius: 8px; padding: 10px 12px 8px; min-width: 0; }
+.ld-label { font-size: 12px; color: var(--muted); }
+.ld-value { font-size: 22px; font-weight: 600; color: var(--white); margin: 2px 0; display: flex; align-items: baseline; gap: 8px; }
+.ld-sub { font-size: 11px; color: var(--muted); min-height: 14px; }
+.ld-state { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px; }
+.ld-state.ok { color: var(--green); background: var(--green-bg); }
+.ld-state.warn { color: var(--yellow); background: #3a311a; }
+.ld-state.bad { color: var(--red); background: var(--red-bg); }
+.ld-chart { display: block; width: 100%; height: 64px; margin-top: 6px; cursor: crosshair; }
+.ld-chart .ld-grid { stroke: var(--muted); stroke-opacity: .2; stroke-dasharray: 2 4; }
+.ld-chart .ld-line { fill: none; stroke: var(--green); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.ld-chart .ld-area { fill: var(--green); fill-opacity: .12; }
+.ld-chart .ld-cross { stroke: var(--white); stroke-opacity: .5; stroke-width: 1; vector-effect: non-scaling-stroke; }
+#ld-note { margin-top: 10px; }
+
+.pl-err:empty { display: none; }
+.pl-err { margin: 0 0 12px; color: var(--yellow); }
+
+/* Друзья в сети */
+.chip.friends { padding: 0 12px; height: 40px; gap: 6px; color: var(--muted); }
+.chip.friends svg { width: 18px; height: 18px; }
+.chip.friends.some { color: var(--green); }
+#friends-count { font-weight: 600; min-width: 8px; }
+.item.fr { gap: 10px; }
+.item.fr .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+.item.fr .dot.on { background: var(--green); box-shadow: 0 0 0 3px var(--green-bg); }
+.item.fr .btn svg { width: 15px; height: 15px; }
+.fr-check { margin-top: 14px; }
+.card.flash { outline: 2px solid var(--green); outline-offset: 2px; }
+.card .pick .mem + .mem { margin-left: 4px; }
+
+/* Проверка связи */
+.ck-list { display: flex; flex-direction: column; gap: 8px; }
+.ck { display: flex; gap: 10px; align-items: flex-start; background: var(--line); border-radius: 8px; padding: 9px 12px; }
+.ck-ico { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; flex: none; }
+.ck-ico svg { width: 14px; height: 14px; }
+.ck.ok .ck-ico { background: var(--green-bg); color: var(--green); }
+.ck.warn .ck-ico { background: #3a311a; color: var(--yellow); }
+.ck.bad .ck-ico { background: var(--red-bg); color: var(--red); }
+.ck.skip { opacity: .55; }
+.ck.skip .ck-ico { color: var(--muted); }
+.ck-title { font-weight: 600; color: var(--white); font-size: 13px; }
+.ck-text { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.ck-summary { margin-top: 12px; font-size: 13px; padding: 10px 12px; border-radius: 8px; }
+.ck-summary.ok { background: var(--green-bg); color: var(--green); }
+.ck-summary.bad { background: var(--red-bg); color: var(--red); }
+
+/* Обновление модов */
+.upd-head { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
+.upd-head .check { margin: 0; }
+.upd-list { max-height: 300px; overflow-y: auto; }
+.item.upd { cursor: pointer; gap: 12px; }
+.item.upd input { width: 16px; height: 16px; accent-color: var(--green); flex: none; }
+.item.upd .tag { font-size: 11px; color: var(--yellow); margin-left: 6px; font-weight: 400; }
+.item.upd .meta b { color: var(--green); font-weight: 600; }

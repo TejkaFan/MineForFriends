@@ -31,6 +31,8 @@ import webview
 import custom_packs
 from cloud_server import MAX_SKIN, NICK_RE, png_size, valid_skin_size
 import crashes
+import friends
+import mod_updates
 import recipes
 import reports
 import screenshots
@@ -39,7 +41,7 @@ import server_host
 import share
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.9.4"
+APP_VERSION = "0.9.5"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -69,7 +71,7 @@ DEFAULT_PACK = {
 # Как часто обновлять индикатор серверов, мс
 STATUS_REFRESH = 30_000
 # Настройки из окна «О лаунчере»: крестик сворачивает в трей; уведомления о серверах друзей
-OPTIONS = {"tray": True, "notify": True}
+OPTIONS = {"tray": True, "notify": True, "presence": True}
 RADMIN_SITE = "https://www.radmin-vpn.com/ru/"
 # Сколько файлов сборки качать одновременно
 DOWNLOAD_THREADS = 6
@@ -969,6 +971,8 @@ class Api:
         self._tray = None  # значок в трее (tray.Tray), создаёт run_gui
         self._status_before = {}  # прошлый опрос серверов — для уведомлений
         self._tray_hint = False  # подсказку «я в трее» показываем один раз за запуск
+        self._cards = []  # последний опрос серверов: из него «кто на каком сервере»
+        self._last_pack = ""  # что запускал игрок — друзья увидят «играет в …»
 
     def _emit(self, event: str, data=None) -> None:
         try:
@@ -1048,6 +1052,7 @@ class Api:
             return
         self._booted = True
         threading.Thread(target=self._watch_servers, daemon=True).start()
+        friends.Presence(self._about_me).start()
         # Сервер мог быть запущен и без лаунчера (start.bat): раздача сама дождётся его или закроется
         start_sharing()
         if not tlauncher_exe():
@@ -1122,6 +1127,11 @@ class Api:
         while True:
             data = self._servers()
             self._emit("servers", data)
+            self._cards = data["packs"]
+            try:
+                self._emit("friends", self._friends())
+            except Exception:
+                traceback.print_exc()  # без списка друзей лаунчер работает как раньше
             events = server_changes(self._status_before, data["packs"], my_nick())
             if self._tray and option("notify"):
                 for title, text in events[:3]:  # больше трёх разом — уже шум
@@ -1156,6 +1166,52 @@ class Api:
             c["memory"] = pack_memory(c["id"], self._memory_dir(c["id"]), c.get("size") or 0)
         return {"cloud": cloud_ok, "packs": cards, "selected": selected_packs(), "radmin": radmin_state()}
 
+    # ---- Друзья в сети и проверка связи
+
+    def _about_me(self):
+        # Что видят друзья по Radmin. Выключено в «О лаунчере» — не отвечаем вовсе
+        if not option("presence"):
+            return None
+        nick = my_nick()
+        if not nick:
+            return None
+        title = friends.minecraft_window()
+        hosting = [c["name"] for c in self._cards if c.get("kind") == "own" and c.get("status")]
+        return {"v": 1, "nick": nick, "app": APP_VERSION, "state": "playing" if title else "launcher",
+                "pack": self._last_pack if title else "", "mode": friends.game_mode(title) if title else "",
+                "hosting": hosting[:3]}
+
+    def _friends(self) -> list:
+        """Друзья в сети: ответившие лаунчеры плюс ники с серверов (у кого лаунчер закрыт)."""
+        me = my_nick().lower()
+        people = {}
+        for f in friends.ask(friend_hosts()):
+            nick = f.get("nick") or ""
+            if not NICK_RE.match(nick) or nick.lower() == me:
+                continue
+            hosting = [str(h)[:60] for h in f.get("hosting") or [] if isinstance(h, str)][:3]
+            people[nick.lower()] = {"nick": nick, "ip": f["ip"], "launcher": True,
+                                    "playing": f.get("state") == "playing", "pack": str(f.get("pack") or "")[:80],
+                                    "mode": str(f.get("mode") or "")[:30], "hosting": hosting,
+                                    "app": str(f.get("app") or "")[:12], "server": "", "card": "", "address": ""}
+        for c in self._cards:
+            for nick in (c.get("status") or {}).get("names", []):
+                if nick.lower() == me:
+                    continue
+                person = people.setdefault(nick.lower(), {
+                    "nick": nick, "ip": "", "launcher": False, "pack": "", "mode": "", "hosting": [], "app": ""})
+                person.update(playing=True, server=c["name"], card=c["id"], address=c["address"])
+        return sorted(people.values(), key=lambda p: (not p["server"], not p["playing"], p["nick"].lower()))
+
+    def friends_online(self) -> list:
+        return self._friends()
+
+    def check_connection(self, address: str) -> dict:
+        address = (address or "").strip()
+        if not address:
+            raise RuntimeError("Впиши адрес сервера, например 26.12.34.56:25565.")
+        return friends.check(address, radmin_state(), lambda a: server_status(a, 5))
+
     def open_radmin(self) -> None:
         exe = radmin_exe()
         if exe:
@@ -1187,6 +1243,8 @@ class Api:
         save_selected_packs(ids)
 
     def play(self) -> str:
+        chosen = [c["name"] for c in self._cards if c["id"] in selected_packs()]
+        self._last_pack = ", ".join(chosen[:2])
         message = Updater(self._status("play"), self._progress("play")).run()
         # С треем лаунчер прячется и продолжает присылать уведомления, без него — закрывается
         threading.Timer(6, self.close).start()
@@ -1280,6 +1338,7 @@ class Api:
         if not profile:
             raise RuntimeError("Сборка не найдена.")
         note = apply_memory(pack_memory(f"custom:{version_id}", profile["game_dir"]))
+        self._last_pack = profile["name"]
         where = "В TLauncher" if Updater(lambda s: None, lambda v: None).open_tlauncher() else "Открой TLauncher и"
         return f"{where} выбери версию «{version_id}» и нажми «Войти в игру». {note}"
 
@@ -1333,6 +1392,49 @@ class Api:
 
     def profile_list(self) -> list:
         return [{**p, "loader_name": custom_packs.LOADER_NAMES.get(p["loader"], p["loader"])} for p in custom_profiles()]
+
+    # ---- Обновление модов своей сборки
+
+    def _profile(self, version_id: str) -> dict:
+        profile = next((p for p in custom_profiles() if p["version_id"] == version_id), None)
+        if not profile:
+            raise RuntimeError("Сборка не найдена.")
+        return profile
+
+    def mod_updates(self, version_id: str) -> dict:
+        p = self._profile(version_id)
+        found = mod_updates.check(Path(p["game_dir"]), p["loader"], p["minecraft"], self._status("custom"))
+        self._mod_updates = (version_id, found["updates"])
+        return found
+
+    def apply_mod_updates(self, version_id: str, picked: list) -> str:
+        p = self._profile(version_id)
+        if not getattr(self, "_mod_updates", None) or self._mod_updates[0] != version_id:
+            raise RuntimeError("Сначала проверь обновления.")
+        if friends.minecraft_window():
+            raise RuntimeError("Закрой Minecraft: пока игра запущена, Windows не даёт заменить файлы модов.")
+        chosen = [u for i, u in enumerate(self._mod_updates[1]) if i in set(picked)]
+        if not chosen:
+            raise RuntimeError("Отметь хотя бы один мод.")
+        res = mod_updates.apply(Path(p["game_dir"]), chosen, p["loader"], p["minecraft"],
+                                self._status("custom"), self._progress("custom"))
+        self._mod_updates = None
+        lines = [f"Обновлено модов: {len(res['updated'])}."]
+        if res["added"]:
+            lines.append("Докачаны новые зависимости: " + ", ".join(res["added"][:6]))
+        if res["failed"]:
+            lines.append("Не получилось: " + ", ".join(res["failed"][:6]))
+        if res["not_found"]:
+            lines.append("Не нашёл зависимости: " + ", ".join(res["not_found"][:4]))
+        if res["backup"]:
+            lines.append(f"Старые версии лежат в папке сборки (кнопка с папкой): mods_backup/{Path(res['backup']).name}. "
+                         "Если что-то сломалось, верни их в папку mods.")
+        if any(s.get("pack") == p["name"] for s in hosted_servers()):
+            lines.append("У тебя есть сервер из этой сборки — на нём моды остались старыми. "
+                         "Если друзей не пускает на сервер, собери сервер заново.")
+        if p.get("recipe"):
+            lines.append("Это сборка друга: если он выпустит обновление и ты нажмёшь «Обновить», моды вернутся к его версиям.")
+        return "\n\n".join(lines)
 
     def remove_profile(self, version_id: str) -> None:
         profile = next((p for p in custom_profiles() if p["version_id"] == version_id), None)
@@ -1463,6 +1565,16 @@ class Api:
     def server_player_action(self, path: str, action: str, name: str = "") -> None:
         self._server(path)
         server_admin.player_action(Path(path), self._online(path), action, name.strip())
+
+    def server_load(self, path: str) -> dict:
+        record = self._server(path)
+        if not getattr(self, "_monitor", None):
+            self._monitor = server_admin.Monitor()
+        result = self._monitor.sample(Path(path), record.get("loader", ""), int(record.get("ram") or 4))
+        port = server_host.read_properties(Path(path) / "server.properties").get("server-port", "25565")
+        status = server_status(f"127.0.0.1:{port}", 1) if result["running"] else None
+        result["players"] = status["online"] if status else None
+        return result
 
     def backup_server(self, path: str) -> str:
         self._server(path)
