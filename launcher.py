@@ -31,12 +31,13 @@ import custom_packs
 from cloud_server import MAX_SKIN, NICK_RE, png_size, valid_skin_size
 import crashes
 import reports
+import screenshots
 import server_admin
 import server_host
 import share
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.9"
+APP_VERSION = "0.9.3"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -65,6 +66,8 @@ DEFAULT_PACK = {
 }
 # Как часто обновлять индикатор серверов, мс
 STATUS_REFRESH = 30_000
+# Настройки из окна «О лаунчере»: крестик сворачивает в трей; уведомления о серверах друзей
+OPTIONS = {"tray": True, "notify": True}
 RADMIN_SITE = "https://www.radmin-vpn.com/ru/"
 # Сколько файлов сборки качать одновременно
 DOWNLOAD_THREADS = 6
@@ -100,7 +103,8 @@ def migrate_settings() -> None:
 
 def load_json(path: Path, default):
     try:
-        return json.loads(path.read_text("utf-8"))
+        # utf-8-sig: Блокнот и PowerShell сохраняют с BOM — без него файл не прочитался бы и затёрся
+        return json.loads(path.read_text("utf-8-sig"))
     except (OSError, ValueError):
         return default
 
@@ -189,8 +193,11 @@ def server_status(address: str, timeout: float = 3):
     except (OSError, ValueError):
         return None
     players = data.get("players") or {}
+    # Сервер отдаёт до 12 ников онлайн; моды иногда подмешивают туда строки вроде «...and 5 more»
+    names = [p.get("name", "") for p in players.get("sample") or [] if isinstance(p, dict)]
     return {"online": players.get("online", 0), "max": players.get("max", 0),
-            "version": (data.get("version") or {}).get("name", "")}
+            "version": (data.get("version") or {}).get("name", ""),
+            "names": [n for n in names if NICK_RE.match(n)]}
 
 
 def tlauncher_nick(mc_dir: Path) -> str:
@@ -752,8 +759,11 @@ def friend_servers() -> list:
 
 
 def start_sharing() -> None:
-    """Запускает фоновую раздачу своих сборок друзьям; если она уже идёт, второй процесс сам закроется."""
-    if not shared_servers():
+    """Запускает фоновую раздачу своих сборок друзьям и автовыключение пустых серверов.
+
+    Если помощник уже работает, второй процесс сам закроется.
+    """
+    if not hosted_servers():
         return
     if getattr(sys, "frozen", False):
         args = [sys.executable, "--share"]
@@ -764,13 +774,53 @@ def start_sharing() -> None:
                      creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
 
+def option(key: str):
+    return load_json(SETTINGS_FILE, {}).get("options", {}).get(key, OPTIONS[key])
+
+
+def my_nick() -> str:
+    state = load_json(minecraft_dir() / DEFAULT_PACK["game_dir"] / "launcher_state.json", {})
+    return state.get("skin_nick") or tlauncher_nick(minecraft_dir()) or ""
+
+
+def server_changes(before: dict, cards: list, me: str) -> list:
+    """Что изменилось с прошлого опроса серверов: [(заголовок, текст)] для уведомлений.
+
+    before — {id: (включён, {ники})} с прошлого раза; обновляется на месте.
+    """
+    events = []
+    first = not before
+    for c in cards:
+        status = c.get("status")
+        names = set(status.get("names", [])) if status else set()
+        was = before.get(c["id"])
+        before[c["id"]] = (status is not None, names)
+        if first or not status:
+            continue
+        if (not was or not was[0]) and c.get("kind") != "own":
+            events.append((f"Сервер «{c['name']}» запущен", "Можно заходить — открой лаунчер и нажми «Играть»."))
+        elif was:
+            joined = sorted(n for n in names - was[1] if n.lower() != me.lower())
+            if joined:
+                who = ", ".join(joined)
+                events.append((f"{who} на «{c['name']}»", f"{who} {'зашёл' if len(joined) == 1 else 'зашли'} на сервер."))
+    return events
+
+
+def hosted_port(record: dict) -> int:
+    port = server_host.read_properties(Path(record["path"]) / "server.properties").get("server-port") or "25565"
+    return int(port) if port.isdigit() else 25565
+
+
 def run_sharing() -> None:
-    if not shared_servers():
+    if not hosted_servers():
         return
     state = load_json(minecraft_dir() / DEFAULT_PACK["game_dir"] / "launcher_state.json", {})
     nick = state.get("skin_nick") or tlauncher_nick(minecraft_dir()) or socket.gethostname()
     host = share.Host(shared_servers, nick, SETTINGS_FILE.parent / "share_cache.json")
-    share.serve(host, lambda: any(server_status(f"127.0.0.1:{s['port']}", 2) for s in shared_servers()))
+    auto_stop = server_admin.AutoStop()
+    share.serve(host, lambda: any(server_status(f"127.0.0.1:{hosted_port(s)}", 2) for s in hosted_servers()),
+                lambda: auto_stop.tick(hosted_servers(), lambda port: server_status(f"127.0.0.1:{port}", 2)))
 
 
 def build_id() -> str:
@@ -806,6 +856,9 @@ class Api:
         self._skin_path = None  # выбранный, но ещё не загруженный скин
         self._cape = None  # то же для плаща: путь к PNG или "" — убрать плащ
         self._crash = None  # разбор последнего вылета Minecraft
+        self._tray = None  # значок в трее (tray.Tray), создаёт run_gui
+        self._status_before = {}  # прошлый опрос серверов — для уведомлений
+        self._tray_hint = False  # подсказку «я в трее» показываем один раз за запуск
 
     def _emit(self, event: str, data=None) -> None:
         try:
@@ -846,6 +899,7 @@ class Api:
         return {"nick": state.get("skin_nick") or tlauncher_nick(self._mc_dir), "skin": skin_b64(),
                 "cape": skin_b64(CAPE_FILE),
                 "skin_model": settings.get("skin_model", "default"), "updated": updated,
+                "options": {k: option(k) for k in OPTIONS},
                 "loaders": [[l, custom_packs.LOADER_NAMES[l]] for l in custom_packs.LOADERS],
                 "version": APP_VERSION, "build": build_id(), "cloud_url": CLOUD_URL, "mc_dir": str(self._mc_dir),
                 "settings_dir": str(SETTINGS_FILE.parent), "repo": REPO_URL,
@@ -917,7 +971,30 @@ class Api:
         self._window.minimize()
 
     def close(self) -> None:
+        if self._tray and option("tray"):
+            self._window.hide()
+            if not self._tray_hint:
+                self._tray_hint = True
+                self._tray.notify("MineForFriends свернулся в трей",
+                                  "Пришлю уведомление, когда друг запустит сервер. Выход — правой кнопкой по значку.")
+        else:
+            self.quit_app()
+
+    def show_window(self) -> None:
+        self._window.show()
+        self._window.restore()
+
+    def quit_app(self) -> None:
+        if self._tray:
+            self._tray.stop()
         self._window.destroy()
+
+    def set_option(self, key: str, value: bool) -> None:
+        if key not in OPTIONS:
+            raise RuntimeError("Неизвестная настройка.")
+        settings = load_json(SETTINGS_FILE, {})
+        settings.setdefault("options", {})[key] = bool(value)
+        save_json(SETTINGS_FILE, settings)
 
     def open_url(self, url: str) -> None:
         webbrowser.open(url)
@@ -933,7 +1010,12 @@ class Api:
 
     def _watch_servers(self) -> None:
         while True:
-            self._emit("servers", self._servers())
+            data = self._servers()
+            self._emit("servers", data)
+            events = server_changes(self._status_before, data["packs"], my_nick())
+            if self._tray and option("notify"):
+                for title, text in events[:3]:  # больше трёх разом — уже шум
+                    self._tray.notify(title, text)
             time.sleep(STATUS_REFRESH / 1000)
 
     def _servers(self) -> dict:
@@ -995,7 +1077,8 @@ class Api:
 
     def play(self) -> str:
         message = Updater(self._status("play"), self._progress("play")).run()
-        threading.Timer(6, self._window.destroy).start()
+        # С треем лаунчер прячется и продолжает присылать уведомления, без него — закрывается
+        threading.Timer(6, self.close).start()
         return message
 
     # ---- Свои сборки
@@ -1111,7 +1194,8 @@ class Api:
         ip = server_host.radmin_ip()
         hint = (f"Друзья подключаются по адресу {ip}:{props.get('server-port')}" if ip else
                 "Radmin VPN не найден: друзья подключаются по твоему адресу и этому порту")
-        return {"name": record["name"], "fields": fields, "ram": record.get("ram", 4), "hint": hint}
+        return {"name": record["name"], "fields": fields, "ram": record.get("ram", 4),
+                "auto_stop": record.get("auto_stop", 0), "hint": hint}
 
     def save_server_settings(self, path: str, values: dict) -> None:
         record = self._server(path)
@@ -1131,8 +1215,12 @@ class Api:
         ram = str(values.get("ram", "")).strip()
         if not ram.isdigit() or int(ram) < 1:
             raise RuntimeError("Память — целое число гигабайт.")
+        auto_stop = str(values.get("auto_stop", 0)).strip() or "0"
+        if not auto_stop.isdigit():
+            raise RuntimeError("Автовыключение — число минут (0 — не выключать).")
         server_host.write_properties(Path(path) / "server.properties", changes)
         record["ram"] = int(ram)
+        record["auto_stop"] = int(auto_stop)
         server_host.write_start(record)
         save_hosted_servers([record if s["path"] == path else s for s in hosted_servers()])
 
@@ -1181,6 +1269,66 @@ class Api:
         if not saved:
             return "Мира ещё нет: он появится после первого запуска сервера."
         return f"Бэкап готов: {saved}"
+
+    def server_console(self, path: str, pos: int = -1) -> dict:
+        self._server(path)
+        return server_admin.log_tail(Path(path), int(pos))
+
+    def server_command(self, path: str, command: str) -> str:
+        self._server(path)
+        command = command.strip().lstrip("/")
+        if not command:
+            return ""
+        return server_admin.rcon(Path(path), command)[0]
+
+    def server_backups(self, path: str) -> list:
+        self._server(path)
+        return server_admin.backups(Path(path))
+
+    def restore_backup(self, path: str, name: str) -> str:
+        self._server(path)
+        if self._online(path):
+            raise RuntimeError("Сначала останови сервер — мир нельзя подменить, пока он запущен.")
+        before = server_admin.restore(Path(path), name, self._status("host"))
+        return (f"Мир восстановлен из «{name}»."
+                + (f" Мир, каким он был до этого, сохранён в «{before.name}»." if before else ""))
+
+    def server_stats(self, path: str) -> list:
+        self._server(path)
+        return server_admin.player_stats(Path(path))
+
+    # ---- Скриншоты
+
+    def _shot(self, path: str) -> Path:
+        # Только файлы из папок скриншотов игры — путь приходит из интерфейса
+        p = Path(path)
+        if p.parent not in screenshots.folders(self._mc_dir) or not p.is_file():
+            raise RuntimeError("Скриншот не найден — возможно, его уже удалили.")
+        return p
+
+    def screenshot_list(self) -> list:
+        names = {str(self._mc_dir / DEFAULT_PACK["game_dir"]): DEFAULT_PACK["name"]}
+        names.update({p["game_dir"]: p["name"] for p in custom_profiles()})
+        threading.Thread(target=screenshots.clean_cache, args=(SETTINGS_FILE.parent / "thumbs",), daemon=True).start()
+        return screenshots.find(self._mc_dir, names)
+
+    def screenshot_thumb(self, path: str):
+        try:
+            return screenshots.thumbnail(self._shot(path), SETTINGS_FILE.parent / "thumbs")
+        except (OSError, ValueError):
+            return None  # битый файл — в галерее будет пустая плитка
+
+    def screenshot_full(self, path: str) -> str:
+        try:
+            return screenshots.full(self._shot(path))
+        except (OSError, ValueError) as e:
+            raise RuntimeError(f"Не удалось открыть картинку: {e}") from None
+
+    def screenshot_copy(self, path: str) -> None:
+        screenshots.copy_image(self._shot(path))
+
+    def screenshot_show(self, path: str) -> None:
+        subprocess.Popen(["explorer", "/select,", str(self._shot(path))])
 
     def forget_server(self, path: str) -> None:
         save_hosted_servers([s for s in hosted_servers() if s["path"] != path])
@@ -1309,7 +1457,16 @@ def run_gui() -> None:
     api._window = webview.create_window(
         APP_NAME, url=str(RESOURCES / "ui" / "index.html"), js_api=api, width=1000, height=660,
         resizable=False, frameless=True, easy_drag=False, background_color="#14171c")
+    try:
+        import tray  # pystray нужен только окну, фоновому --share он ни к чему
+        api._tray = tray.Tray(APP_NAME, RESOURCES / "icon.ico", api.show_window, api.quit_app)
+        api._tray.start()
+    except Exception as e:
+        print(f"Трей недоступен: {e}")  # без трея крестик просто закрывает лаунчер
+        api._tray = None
     webview.start(http_server=True, icon=str(RESOURCES / "icon.ico"))
+    if api._tray:
+        api._tray.stop()
 
 
 if __name__ == "__main__":

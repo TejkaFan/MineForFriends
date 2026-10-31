@@ -260,3 +260,34 @@ input[type=radio], input[type=checkbox] { accent-color: var(--green-2); margin: 
 
 ::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+
+/* Сервер: кнопки отдельной строкой, консоль, бэкапы, статистика */
+.item.srv { flex-direction: column; align-items: stretch; gap: 6px; }
+.item.srv .tools { flex-wrap: wrap; }
+.console { margin: 0; height: 330px; overflow: auto; background: #0b0d10; border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px; font: 12px/1.45 Consolas, monospace; color: #cfd6df; white-space: pre-wrap; word-break: break-all; }
+.con-row { display: flex; gap: 8px; margin-top: 10px; }
+.con-row input { flex: 1; }
+.bk-list { margin-top: 10px; }
+.bk-list .btn.confirm { color: var(--yellow); }
+table.stats { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.stats th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+table.stats td { padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.stats td.bar { width: 30%; }
+table.stats td.bar i { display: block; height: 6px; border-radius: 3px; background: var(--green-2); }
+.opts { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+
+/* Скриншоты */
+.shots-panel { flex: 1; min-height: 0; }
+.shots-bar { display: flex; align-items: center; gap: 10px; }
+.shots-bar select { width: 230px; padding: 6px 9px; }
+.shots { flex: 1; min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px; align-content: start; }
+.shot { padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--field); cursor: pointer; overflow: hidden;
+  display: flex; flex-direction: column; color: var(--muted); font: inherit; font-size: 11px; text-align: left; }
+.shot:hover { border-color: var(--green-2); }
+.shot img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: var(--line); display: block; }
+.shot img.broken { opacity: .3; }
+.shot span { padding: 5px 8px; display: flex; flex-direction: column; gap: 1px; }
+.shot span b { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shot-view img { width: 100%; height: 400px; object-fit: contain; display: block; border-radius: 6px; background: #000; }

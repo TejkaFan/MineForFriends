@@ -71,7 +71,7 @@ def log_failed(path: Path) -> bool:
 
 def pack_name(mc_dir: Path, path: Path, names: dict) -> str:
     """Название сборки по папке, где лежит файл вылета; names — {папка игры: название} от лаунчера."""
-    game_dir = path.parent.parent if path.parent.name in ("crash-reports", "logs") else path.parent
+    game_dir = path.parent.parent if path.parent.name in ("crash-reports", "logs", "screenshots") else path.parent
     if str(game_dir).lower() in names:
         return names[str(game_dir).lower()]
     marker = game_dir / ".mineserc_pack"

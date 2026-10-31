@@ -4,7 +4,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const api = () => window.pywebview.api;
 
-const TITLES = {play: "Наши серверы", custom: "Свои сборки", server: "Сервер", skin: "Скин"};
+const TITLES = {play: "Наши серверы", custom: "Свои сборки", server: "Сервер", skin: "Скин", shots: "Скриншоты"};
 const state = {packs: [], cloud: null, selected: [], ready: false, busy: false, profiles: [], servers: []};
 
 function icon(name) {
@@ -102,6 +102,7 @@ function go(page) {
   // Списки могли поменяться на соседних вкладках
   if (page === "custom") loadProfiles();
   if (page === "server") loadServerTab();
+  if (page === "shots") loadShots();
   // 3D-модель рисуется только на своей вкладке, чтобы не грузить видеокарту зря
   if (skin.viewer) skin.viewer.renderPaused = page !== "skin";
 }
@@ -409,16 +410,18 @@ async function loadServerTab() {
     : `<option value="">сначала добавь сборку в «Свои сборки»</option>`;
   sel.value = profiles.some(p => p.name === keep) ? keep : (profiles.at(-1)?.name || "");
   $("#hosted").innerHTML = servers.length ? servers.map((s, i) => `
-    <div class="item"><div class="grow"><div class="name">${esc(s.name)}</div>
-      <div class="meta"><span class="state${s.online ? " online" : ""}">${s.online ? `● онлайн · ${esc(s.players)}` : "○ выключен"}</span></div>
-      <div class="meta">${esc(s.address)} · ${esc(s.minecraft)} ${esc(s.loader_name)}</div></div>
+    <div class="item srv"><div class="grow"><div class="name">${esc(s.name)}</div>
+      <div class="meta"><span class="state${s.online ? " online" : ""}">${s.online ? `● онлайн · ${esc(s.players)}` : "○ выключен"}</span>
+        · ${esc(s.address)} · ${esc(s.minecraft)} ${esc(s.loader_name)}</div></div>
       <div class="tools">
         ${s.online
           ? `<button class="iconbtn del" data-act="stop" data-i="${i}" title="Остановить">${icon("player-stop")}</button>
              <button class="iconbtn" data-act="restart" data-i="${i}" title="Перезапустить">${icon("refresh")}</button>`
           : `<button class="iconbtn go" data-act="start" data-i="${i}" title="Запустить (перед запуском — бэкап мира)">${icon("player-play")}</button>`}
+        <button class="iconbtn" data-act="console" data-i="${i}" title="Консоль: лог и команды">${icon("terminal-2")}</button>
         <button class="iconbtn" data-act="players" data-i="${i}" title="Игроки, белый список, операторы">${icon("users")}</button>
-        <button class="iconbtn" data-act="backup" data-i="${i}" title="Бэкап мира сейчас">${icon("device-floppy")}</button>
+        <button class="iconbtn" data-act="stats" data-i="${i}" title="Статистика: кто сколько играл">${icon("chart-bar")}</button>
+        <button class="iconbtn" data-act="backups" data-i="${i}" title="Бэкапы мира: сделать и восстановить">${icon("device-floppy")}</button>
         <button class="iconbtn" data-act="settings" data-i="${i}" title="Настройки">${icon("settings")}</button>
         <button class="iconbtn" data-act="folder" data-i="${i}" title="Папка сервера">${icon("folder")}</button>
         <button class="iconbtn del" data-act="forget" data-i="${i}" title="Убрать из списка">${icon("trash")}</button>
@@ -459,6 +462,7 @@ async function serverSettings(path) {
   const html = `<div class="grid-form">
       ${fields.map(f => `<label class="field"><span>${esc(f.label)}</span>${settingControl(f)}</label>`).join("")}
       <label class="field"><span>Память сервера, ГБ</span><input type="number" min="1" max="64" data-key="ram" value="${s.ram}"></label>
+      <label class="field" title="Пустой сервер сам выключится через столько минут. 0 — не выключать"><span>Выключать пустой через, мин</span><input type="number" min="0" data-key="auto_stop" value="${s.auto_stop}"></label>
     </div>
     <div class="grid-form" style="margin-top:14px">
       ${flags.map(f => `<label class="check"><input type="checkbox" data-key="${f.key}"${f.value ? " checked" : ""}><span>${esc(f.label)}</span></label>`).join("")}
@@ -530,15 +534,160 @@ async function serverPlayers(s) {
   await done;
 }
 
+const wait = ms => new Promise(r => setTimeout(r, ms));
+const noColors = text => text.replace(/§./g, ""); // цветовые коды Minecraft
+
+// Консоль: хвост logs/latest.log и команды по RCON
+async function serverConsole(s) {
+  let pos = -1, alive = true;
+  const history = [];
+  let back = 0;
+  const html = `<pre class="console" id="con-log">Загружаю лог…</pre>
+    <form class="con-row" id="con-form">
+      <input id="con-cmd" autocomplete="off" placeholder="Команда без /, например: say Привет · time set day · weather clear">
+      <button class="btn primary" type="submit">Отправить</button></form>
+    <div class="hint" id="con-err">${s.online ? "" : "Сервер выключен — показан лог последнего запуска."}</div>`;
+  const done = dialog({title: `Консоль — ${s.name}`, html, wide: true, buttons: [{label: "Закрыть", value: null}]});
+  const log = $("#con-log"), input = $("#con-cmd");
+  log.textContent = "";
+  const append = text => {
+    const atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
+    log.textContent += noColors(text);
+    if (log.textContent.length > 300000) log.textContent = log.textContent.slice(-200000);
+    if (atEnd) log.scrollTop = log.scrollHeight;
+  };
+  (async () => {
+    while (alive) {
+      try {
+        const r = await api().server_console(s.path, pos);
+        if (pos >= 0 && r.pos < pos) append("\n——— сервер начал новый лог ———\n");
+        pos = r.pos;
+        if (r.text) append(r.text);
+        else if (!log.textContent) log.textContent = "Лог пуст: сервер ещё не запускался.";
+      } catch { /* сервер мог удалить лог при перезапуске — попробуем ещё раз */ }
+      await wait(1500);
+    }
+  })();
+  input.onkeydown = e => {
+    // Стрелки — прошлые команды, как в консоли
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    e.preventDefault();
+    back = Math.max(0, Math.min(history.length, back + (e.key === "ArrowUp" ? 1 : -1)));
+    input.value = back ? history[history.length - back] : "";
+  };
+  $("#con-form").onsubmit = async e => {
+    e.preventDefault();
+    const cmd = input.value.trim();
+    if (!cmd) return;
+    input.value = "";
+    history.push(cmd);
+    back = 0;
+    $("#con-err").textContent = "";
+    log.scrollTop = log.scrollHeight;
+    try {
+      const answer = await api().server_command(s.path, cmd);
+      append(`> ${cmd}\n${answer ? answer.trim() + "\n" : ""}`);
+    } catch (err) {
+      $("#con-err").textContent = errText(err);
+    }
+  };
+  input.focus();
+  await done;
+  alive = false;
+}
+
+// Бэкапы: список, «сделать сейчас», восстановление (сервер должен быть выключен)
+async function serverBackups(s) {
+  const render = async (message = "") => {
+    const body = $("#modal-body");
+    let list;
+    try {
+      list = await api().server_backups(s.path);
+    } catch (e) {
+      body.innerHTML = `<div class="hint">${esc(errText(e))}</div>`;
+      return;
+    }
+    body.innerHTML = `<div class="hint">Бэкап делается сам перед каждым запуском сервера, хранятся последние 7.
+        Восстановить можно, когда сервер выключен; текущий мир перед этим тоже сохранится в бэкап.</div>
+      <div class="list bk-list">${list.length ? list.map(b => `<div class="item">
+          <div class="grow"><div class="name">${esc(b.time)}</div><div class="meta">${esc(b.name)} · ${(b.size / 2 ** 20).toFixed(1)} МБ</div></div>
+          <button class="btn" data-restore="${esc(b.name)}">Восстановить</button></div>`).join("")
+        : `<div class="empty">Бэкапов пока нет</div>`}</div>
+      <div class="line" id="bk-msg">${esc(message)}</div>`;
+  };
+  const done = dialog({title: `Бэкапы мира — ${s.name}`, html: '<div class="muted">Загружаю…</div>', wide: true, buttons: [
+    {label: "Сделать бэкап сейчас", value: null, check: async () => {
+      $("#bk-msg").textContent = "Делаю бэкап…";
+      try {
+        await render(await api().backup_server(s.path));
+      } catch (e) {
+        $("#bk-msg").textContent = errText(e);
+      }
+      return false; // окно остаётся открытым
+    }},
+    {label: "Закрыть", value: null, primary: true}]});
+  $("#modal-body").onclick = async e => {
+    const b = e.target.closest("button[data-restore]");
+    if (!b) return;
+    // Второе нажатие — подтверждение: мир заменится целиком
+    if (!b.classList.contains("confirm")) {
+      for (const other of $$("button.confirm")) { other.classList.remove("confirm"); other.textContent = "Восстановить"; }
+      b.classList.add("confirm");
+      b.textContent = "Точно? Нажми ещё раз";
+      return;
+    }
+    b.disabled = true;
+    b.textContent = "Восстанавливаю…";
+    try {
+      await render(await api().restore_backup(s.path, b.dataset.restore));
+    } catch (err) {
+      b.disabled = false;
+      b.classList.remove("confirm");
+      b.textContent = "Восстановить";
+      $("#bk-msg").textContent = errText(err);
+    }
+  };
+  await render();
+  await done;
+}
+
+function duration(seconds) {
+  const h = Math.floor(seconds / 3600), m = Math.round((seconds % 3600) / 60);
+  return h ? `${h} ч ${m} мин` : `${m} мин`;
+}
+
+// Статистика по логам сервера: кто сколько играл и когда заходил
+async function serverStats(s) {
+  const done = dialog({title: `Статистика — ${s.name}`, html: '<div class="muted">Считаю по логам сервера…</div>', wide: true,
+                       buttons: [{label: "Закрыть", value: null, primary: true}]});
+  try {
+    const rows = await api().server_stats(s.path);
+    const top = rows[0]?.seconds || 1;
+    $("#modal-body").innerHTML = rows.length ? `<table class="stats">
+        <tr><th>Игрок</th><th>Наиграно</th><th></th><th>Заходов</th><th>Последний раз</th></tr>
+        ${rows.map(r => `<tr><td>${esc(r.name)}</td><td>${duration(r.seconds)}</td>
+          <td class="bar"><i style="width:${Math.max(2, Math.round(r.seconds / top * 100))}%"></i></td>
+          <td>${r.sessions}</td><td>${esc(r.last)}</td></tr>`).join("")}</table>
+      <div class="hint">Считается по логам сервера (папка logs): входы и выходы игроков.</div>`
+      : `<div class="empty">Пока никто не заходил — или логи сервера удалены.</div>`;
+  } catch (e) {
+    $("#modal-body").innerHTML = `<div class="hint">${esc(errText(e))}</div>`;
+  }
+  await done;
+}
+
 async function serverAction(act, s) {
   try {
-    if (["start", "stop", "restart", "backup"].includes(act)) {
-      setStatus("host", act === "backup" ? "Делаю бэкап мира…" : act === "stop" ? "Останавливаю сервер…" : "Готовлю запуск…");
-      const call = {start: "start_server", stop: "stop_server", restart: "restart_server", backup: "backup_server"}[act];
+    if (["start", "stop", "restart"].includes(act)) {
+      setStatus("host", act === "stop" ? "Останавливаю сервер…" : "Готовлю запуск…");
+      const call = {start: "start_server", stop: "stop_server", restart: "restart_server"}[act];
       setStatus("host", await api()[call](s.path));
       // Сервер запускается и выключается не мгновенно — обновим индикатор чуть позже
       setTimeout(loadServerTab, act === "stop" ? 8000 : 25000);
     }
+    if (act === "console") await serverConsole(s);
+    if (act === "stats") await serverStats(s);
+    if (act === "backups") await serverBackups(s);
     if (act === "players") await serverPlayers(s);
     if (act === "settings") await serverSettings(s.path);
     if (act === "folder") await api().open_folder(s.path);
@@ -700,6 +849,88 @@ function toggleSkinAnimation() {
   btn.innerHTML = icon(skin.animate ? "player-pause" : "player-play");
 }
 
+// ---------- Скриншоты ----------
+
+// list — все найденные, view — после фильтра по сборке (по нему индексы плиток)
+const shots = {list: [], view: [], loaded: false, observer: null};
+const thumbs = {queue: [], busy: 0};
+
+async function loadShots(force = false) {
+  if (shots.loaded && !force) return;
+  shots.loaded = true;
+  $("#shots").innerHTML = '<div class="muted">Ищу скриншоты…</div>';
+  try {
+    shots.list = await api().screenshot_list();
+  } catch (e) {
+    shots.loaded = false;
+    $("#shots").innerHTML = `<div class="hint">${esc(errText(e))}</div>`;
+    return;
+  }
+  const sel = $("#shots-pack"), keep = sel.value;
+  const packs = [...new Set(shots.list.map(s => s.pack))];
+  sel.innerHTML = `<option value="">Все сборки</option>` + packs.map(p => `<option>${esc(p)}</option>`).join("");
+  sel.value = packs.includes(keep) ? keep : "";
+  renderShots();
+}
+
+function pumpThumbs() {
+  // Не больше трёх миниатюр разом: каждая — чтение и сжатие картинки в Python
+  while (thumbs.busy < 3 && thumbs.queue.length) {
+    const img = thumbs.queue.shift();
+    if (!img.isConnected) continue;
+    thumbs.busy++;
+    api().screenshot_thumb(img.dataset.path)
+      .then(b64 => { if (b64) img.src = "data:image/jpeg;base64," + b64; else img.classList.add("broken"); })
+      .catch(() => img.classList.add("broken"))
+      .finally(() => { thumbs.busy--; pumpThumbs(); });
+  }
+}
+
+function renderShots() {
+  const pack = $("#shots-pack").value;
+  shots.view = shots.list.filter(s => !pack || s.pack === pack);
+  $("#shots-info").textContent = shots.list.length
+    ? `${shots.view.length} шт. · в игре скриншот — клавиша F2` : "";
+  const grid = $("#shots");
+  thumbs.queue = [];
+  grid.innerHTML = shots.view.length ? shots.view.map((s, i) => `
+    <button class="shot" data-i="${i}" title="${esc(s.pack)} · ${esc(s.name)}">
+      <img alt="" data-path="${esc(s.path)}"><span><b>${esc(s.pack)}</b>${esc(s.time)}</span></button>`).join("")
+    : `<div class="empty">Скриншотов пока нет. В игре нажми F2 — снимок появится здесь.</div>`;
+  shots.observer?.disconnect();
+  shots.observer = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      shots.observer.unobserve(e.target);
+      thumbs.queue.push(e.target);
+    }
+    pumpThumbs();
+  }, {root: grid, rootMargin: "300px"});
+  for (const img of $$("img[data-path]", grid)) shots.observer.observe(img);
+}
+
+async function viewShot(s) {
+  if (!s) return;
+  const done = dialog({title: `${s.pack} · ${s.time}`, wide: true,
+    html: `<div class="shot-view"><img id="shot-big" alt=""></div><div class="line" id="shot-msg"></div>`,
+    buttons: [
+      {label: "Копировать", value: null, check: async () => {
+        try {
+          await api().screenshot_copy(s.path);
+          $("#shot-msg").textContent = "Скопировано — вставь через Ctrl+V в Telegram или Discord";
+        } catch (e) {
+          $("#shot-msg").textContent = errText(e);
+        }
+        return false;
+      }},
+      {label: "Показать в папке", value: "folder"},
+      {label: "Закрыть", value: null, primary: true}]});
+  api().screenshot_full(s.path)
+    .then(b64 => { $("#shot-big").src = "data:image/jpeg;base64," + b64; })
+    .catch(e => { $("#shot-msg").textContent = errText(e); });
+  if (await done === "folder") api().screenshot_show(s.path);
+}
+
 // ---------- О лаунчере ----------
 
 const CREDITS = [
@@ -729,6 +960,10 @@ function about() {
       <span>Настройки</span><span>${esc(i.settings_dir)}</span>
       <span>Отчёты</span><span class="text">Сбои лаунчера сами уходят автору: описание ошибки и лог, без имени пользователя Windows</span>
     </div>
+    <div class="pl-sec opts">
+      <label class="check"><input type="checkbox" data-opt="tray"${i.options.tray ? " checked" : ""}><span>Крестик сворачивает лаунчер в трей (выход — правой кнопкой по значку)</span></label>
+      <label class="check"><input type="checkbox" data-opt="notify"${i.options.notify ? " checked" : ""}><span>Уведомлять, когда друг запустил сервер или зашёл на него</span></label>
+    </div>
     <div class="credits"><h4 class="px">Credits</h4><div class="kv">${credits}</div></div>`;
   dialog({title: "MineForFriends by TEJKA", html, buttons: [
     {label: "Отправить лог", value: "report"}, {label: "Папка Minecraft", value: "mc"},
@@ -737,6 +972,12 @@ function about() {
     if (v === "mc") api().open_folder(i.mc_dir);
     if (v === "report") sendReport("Отчёт игрока из окна «О лаунчере»");
   });
+  $("#modal-body").onchange = e => {
+    const opt = e.target.dataset.opt;
+    if (!opt) return;
+    i.options[opt] = e.target.checked;
+    api().set_option(opt, e.target.checked).catch(err => showError(errText(err)));
+  };
   $("#modal-body").onclick = async e => {
     const a = e.target.closest("a");
     if (a?.dataset.url) api().open_url(a.dataset.url);
@@ -882,6 +1123,9 @@ function bind() {
   };
   $("#skin-choose").onclick = chooseSkin;
   $("#skin-upload").onclick = uploadSkin;
+  $("#shots-pack").onchange = renderShots;
+  $("#shots-refresh").onclick = () => loadShots(true);
+  $("#shots").onclick = e => { const b = e.target.closest(".shot"); if (b) viewShot(shots.view[b.dataset.i]); };
   $("#cape-choose").onclick = chooseCape;
   $("#cape-remove").onclick = removeCape;
   $("#skin-anim").onclick = toggleSkinAnimation;

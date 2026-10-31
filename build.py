@@ -79,6 +79,8 @@ def main() -> None:
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--windowed", "--name", "MineForFriends",
         "--icon", str(HERE / "icon.ico"), "--version-file", str(info),
         "--add-data", f"{HERE / 'icon.ico'};.", "--add-data", f"{HERE / 'ui'};ui",
+        # pystray выбирает бэкенд при запуске — PyInstaller сам его не увидит
+        "--hidden-import", "pystray._win32",
         "--exclude-module", "minecraft_launcher_lib", "--exclude-module", "tkinter",
         "--distpath", str(HERE / "dist"), "--workpath", str(BUILD), "--specpath", str(BUILD),
         str(HERE / "launcher.py"),

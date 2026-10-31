@@ -13,6 +13,7 @@
     <button class="nav" data-page="custom" data-icon="box" title="Свои сборки"></button>
     <button class="nav" data-page="server" data-icon="server-2" title="Сервер"></button>
     <button class="nav" data-page="skin" data-icon="shirt" title="Скин"></button>
+    <button class="nav" data-page="shots" data-icon="photo" title="Скриншоты"></button>
     <div class="grow pywebview-drag-region"></div>
     <button class="nav small" id="news-btn" data-icon="news" title="Что нового"></button>
     <button class="nav small" id="about-btn" data-icon="settings" title="О лаунчере"></button>
@@ -154,6 +155,18 @@
           <button class="btn primary wide" id="skin-upload" disabled><span data-icon="upload"></span>Загрузить на сервер</button>
           <div class="line" id="skin-status"></div>
         </div>
+      </div>
+    </section>
+
+    <!-- Скриншоты -->
+    <section class="page" id="page-shots">
+      <div class="panel shots-panel">
+        <div class="shots-bar">
+          <select id="shots-pack"></select>
+          <span class="muted small grow" id="shots-info"></span>
+          <button class="iconbtn" id="shots-refresh" data-icon="refresh" title="Обновить"></button>
+        </div>
+        <div class="shots" id="shots"></div>
       </div>
     </section>
   </main>

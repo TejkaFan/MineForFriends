@@ -152,8 +152,11 @@ def answer(udp: socket.socket) -> None:
             time.sleep(1)
 
 
-def serve(host: Host, any_online) -> None:
-    """Раздаёт сборки, пока запущен хоть один сервер. Если раздача уже идёт — сразу выходит."""
+def serve(host: Host, any_online, tick=None) -> None:
+    """Раздаёт сборки, пока запущен хоть один сервер. Если раздача уже идёт — сразу выходит.
+
+    tick() вызывается каждые 20 секунд — для автовыключения пустых серверов.
+    """
     try:
         http = Server(("0.0.0.0", PORT), Handler)
     except OSError:
@@ -169,6 +172,11 @@ def serve(host: Host, any_online) -> None:
     seen, last = False, time.time()
     while True:
         time.sleep(20)
+        if tick:
+            try:
+                tick()
+            except Exception:
+                traceback.print_exc()
         if any_online():
             seen, last = True, time.time()
         elif time.time() - last > (WAIT_STOP if seen else WAIT_START):
