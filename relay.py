@@ -2,12 +2,14 @@
 
 У части провайдеров соединение с Cloudflare (и не только) обрывается посреди передачи: маленькая
 страница открывается, а скин, отчёт, загрузчик Fabric или мод — уже нет (ConnectionResetError 10054,
-SSL EOF). Тогда лаунчер шлёт тот же запрос облаку хоста по Radmin (этот трафик провайдер не видит),
-а облако выполняет его само. После первого обрыва лаунчер до конца запуска сразу идёт через облако.
+SSL EOF). Облако хоста по Radmin (этот трафик провайдер не видит) выполняет такие запросы само.
 
-    request/post/get — запросы к Worker (скины, отчёты, сборки друзей), маршрут вида "/upload"
+    request/post/get — запросы к Worker (скины, отчёты, сборки друзей), маршрут вида "/upload".
+        Пока облако хоста включено, идут через него; выключено или на паузе — напрямую
     protect(session) — сессия requests, которая для сайтов из FETCH_HOSTS сама уходит в обход
 """
+import socket
+import time
 import urllib.parse
 
 import requests
@@ -16,7 +18,18 @@ from requests.adapters import HTTPAdapter
 from cloud_server import FETCH_HOSTS
 
 WORKER = "https://mineforfriends-skins.inkiandmelon.workers.dev"
-CLOUD = "http://26.199.180.115:8518"
+HOST_IP = "26.199.180.115"
+
+
+def own_ips() -> set:
+    try:
+        return set(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        return set()
+
+
+# На ПК хоста свой Radmin-адрес изнутри не отвечает: к своему облаку идём через 127.0.0.1
+CLOUD = f"http://{'127.0.0.1' if HOST_IP in own_ips() else HOST_IP}:8518"
 CLOUD_RELAY = CLOUD + "/relay"
 CLOUD_FETCH = CLOUD + "/relay-url"
 # Обрыв, зависание или отказ соединения — то, что лечит обход через облако
@@ -28,35 +41,26 @@ web.headers["User-Agent"] = "MineForFriends-launcher (github.com/TejkaFan)"
 cloud = requests.Session()
 cloud.trust_env = False
 cloud.headers["User-Agent"] = web.headers["User-Agent"]
-state = {"via_cloud": False}
+# Облако по Radmin отвечает за доли секунды; не ответило за это время — выключено
+CLOUD_CONNECT = 2
+# Облако не ответило — столько секунд шлём напрямую, потом снова пробуем облако
+CLOUD_RETRY = 300
+state = {"cloud_down_until": 0.0}
 blocked_hosts = set()
 
 
 def request(method: str, path: str, timeout: float, **kw) -> requests.Response:
-    """path — маршрут Worker, например "/upload". Ответ Worker, напрямую или через облако."""
-    if not state["via_cloud"]:
+    """path — маршрут Worker, например "/upload". Ответ Worker: через облако хоста, если оно включено, иначе напрямую."""
+    if time.monotonic() >= state["cloud_down_until"]:
         try:
-            return web.request(method, WORKER + path, timeout=timeout, **kw)
-        except BLOCKED as e:
-            direct_error = e
-    else:
-        direct_error = None
-    try:
-        r = cloud.request(method, CLOUD_RELAY + path, timeout=timeout, **kw)
-    except requests.RequestException:
-        # Облако тоже недоступно (хост выключил ПК или Radmin) — покажем исходную ошибку
-        if direct_error:
-            raise direct_error
-        state["via_cloud"] = False
-        return web.request(method, WORKER + path, timeout=timeout, **kw)
-    if r.status_code == 404 and r.headers.get("X-MFF-Relay") != "1":
-        # Облако старой версии, без пересылки
-        if direct_error:
-            raise direct_error
-        state["via_cloud"] = False
-        return web.request(method, WORKER + path, timeout=timeout, **kw)
-    state["via_cloud"] = True
-    return r
+            r = cloud.request(method, CLOUD_RELAY + path, timeout=(CLOUD_CONNECT, timeout), **kw)
+            # Без отметки X-MFF-Relay ответило не пересылкой: облако на паузе, старой версии или не дошло до Worker
+            if r.headers.get("X-MFF-Relay") == "1":
+                return r
+        except requests.RequestException:
+            pass
+        state["cloud_down_until"] = time.monotonic() + CLOUD_RETRY
+    return web.request(method, WORKER + path, timeout=timeout, **kw)
 
 
 def post(path: str, timeout: float, **kw) -> requests.Response:
