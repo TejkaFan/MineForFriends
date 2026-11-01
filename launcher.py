@@ -43,7 +43,7 @@ import server_host
 import share
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.9.7"
+APP_VERSION = "0.9.8"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -237,6 +237,24 @@ def setup_skin_loader(game_dir: Path) -> None:
     # Прежняя запись нашего облака тоже уходит: скины теперь только на GitHub
     config["loadlist"] = [ours] + [p for p in loadlist if p.get("name") not in (APP_ID, OLD_APP_ID)]
     save_json(path, config)
+
+
+def prepare_workdir(game_dir, mc_dir: Path) -> None:
+    """TLauncher запускает игру из папки .minecraft, а не из папки сборки. FancyMenu (меню и загрузочный
+    экран, есть в Homestead) ищет config/fancymenu/customizablemenus.txt и custom_locals от этой рабочей
+    папки и без них падает при запуске (NullPointerException в ScreenCustomization). Кладём их туда
+    из запускаемой сборки."""
+    source = Path(game_dir) / "config" / "fancymenu"
+    if not any((Path(game_dir) / "mods").glob("fancymenu*.jar")):
+        return
+    target = mc_dir / "config" / "fancymenu"
+    try:
+        (target / "custom_locals").mkdir(parents=True, exist_ok=True)
+        menus = source / "customizablemenus.txt"
+        if menus.is_file():
+            shutil.copyfile(menus, target / "customizablemenus.txt")
+    except OSError:
+        traceback.print_exc()
 
 
 def tlauncher_exe():
@@ -656,6 +674,7 @@ class Updater:
         ids = pack_ids or selected_packs()
         versions, notes = [], []
         memory = []  # ГБ для каждой запускаемой сборки — TLauncher получит наибольшую
+        dirs = []
 
         # Свои серверы: сборка уже стоит, добавляем сервер в список серверов игры
         for s in shared_servers():
@@ -664,6 +683,7 @@ class Updater:
                 versions.append(s["version_id"])
                 memory.append(pack_memory(f"own:{s['id']}", s["game_dir"]))
                 remember_dir(f"own:{s['id']}", s["game_dir"])
+                dirs.append(s["game_dir"])
         # Серверы друзей из Radmin
         friends = [i for i in ids if i.startswith("radmin:")]
         if friends:
@@ -673,6 +693,7 @@ class Updater:
                     versions.append(self.install_shared(found[key]))
                     memory.append(pack_memory(key, self.friend_dir(found[key])))
                     remember_dir(key, self.friend_dir(found[key]))
+                    dirs.append(self.friend_dir(found[key]))
 
         chosen = []
         if any(":" not in i for i in ids):
@@ -697,9 +718,12 @@ class Updater:
             versions.append(pack["version_id"])
             memory.append(pack_memory(entry["id"], game_dir))
             remember_dir(entry["id"], game_dir)
+            dirs.append(game_dir)
             if pack.get("note"):
                 notes.append(pack["note"])
 
+        for game_dir in dirs:
+            prepare_workdir(game_dir, self.mc_dir)
         self.progress(1)
         if open_tl and memory:
             notes.append(apply_memory(max(memory)))
@@ -1339,6 +1363,7 @@ class Api:
         if not profile:
             raise RuntimeError("Сборка не найдена.")
         note = apply_memory(pack_memory(f"custom:{version_id}", profile["game_dir"]))
+        prepare_workdir(profile["game_dir"], minecraft_dir())
         self._last_pack = profile["name"]
         where = "В TLauncher" if Updater(lambda s: None, lambda v: None).open_tlauncher() else "Открой TLauncher и"
         return f"{where} выбери версию «{version_id}» и нажми «Войти в игру». {note}"
