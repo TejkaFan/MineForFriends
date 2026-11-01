@@ -13,16 +13,30 @@ import os
 import sys
 import threading
 import time
+import traceback
 import winreg
 from pathlib import Path
 
-import pystray
-from PIL import Image, ImageEnhance
-
-import cloud_server
-
 HERE = Path(__file__).resolve().parent
-LOG = cloud_server.ROOT / "cloud.log"
+LOG = HERE.parent / "cloud.log"
+
+
+def open_log() -> None:
+    # У pythonw нет консоли: всё, что облако пишет, уходит в файл. Старый журнал — в cloud.old.log.
+    # Открываем до остальных импортов, иначе ошибка при запуске Windows пропадёт бесследно
+    if LOG.exists() and LOG.stat().st_size > 2 << 20:
+        LOG.replace(LOG.with_name("cloud.old.log"))
+    sys.stdout = sys.stderr = LOG.open("a", encoding="utf-8", buffering=1)
+
+
+if __name__ == "__main__":
+    open_log()
+
+import pystray  # noqa: E402
+from PIL import Image, ImageEnhance  # noqa: E402
+
+import cloud_server  # noqa: E402
+
 SETTINGS = cloud_server.ROOT / "cloud_tray.json"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "MineForFriends-Cloud"
@@ -30,13 +44,6 @@ kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 # Без типов ctypes обрезает псевдодескриптор процесса (-1) до 32 бит, и приоритет не меняется
 kernel32.GetCurrentProcess.restype = ctypes.c_void_p
 kernel32.SetPriorityClass.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
-
-
-def open_log() -> None:
-    # У pythonw нет консоли: всё, что облако пишет, уходит в файл. Старый журнал — в cloud.old.log
-    if LOG.exists() and LOG.stat().st_size > 2 << 20:
-        LOG.replace(LOG.with_name("cloud.old.log"))
-    sys.stdout = sys.stderr = LOG.open("a", encoding="utf-8", buffering=1)
 
 
 def log(text: str) -> None:
@@ -161,15 +168,26 @@ def registered() -> bool:
 
 
 def main() -> None:
-    open_log()
     if not first_instance():
         log("значок облака уже запущен")
         return
     # Облако почти всё время ждёт запросов; пониженный приоритет — чтобы не мешать серверам игры
     kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x4000)  # BELOW_NORMAL_PRIORITY_CLASS
     log(f"запуск, облако: {cloud_server.CLOUD}")
-    Tray().run()
+    # Сразу после входа в Windows панель задач может быть ещё не готова к значку: пробуем несколько раз
+    for attempt in range(5):
+        tray = Tray()
+        try:
+            tray.run()
+            return
+        except Exception:
+            log(f"значок не запустился (попытка {attempt + 1}):\n{traceback.format_exc()}")
+            tray.switch("off")
+            time.sleep(15)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log(f"облако упало:\n{traceback.format_exc()}")
