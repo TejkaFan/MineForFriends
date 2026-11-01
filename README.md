@@ -22,13 +22,22 @@
 - `ui/` — интерфейс лаунчера (HTML/CSS/JS, тёмная тема «Ночной мир») в окне pywebview на WebView2; логика — класс `Api` в `launcher.py`. Шрифт Press Start 2P (OFL), иконки Tabler (MIT) и 3D-предпросмотр скина skinview3d (MIT, `ui/vendor`) лежат локально.
 - `custom_packs.py` — вкладка «Свои сборки»: игрок выбирает папку или архив со сборкой (CurseForge, Modrinth `.mrpack`, MultiMC/Prism или просто папку с модами). Лаунчер определяет версию Minecraft и загрузчик (Fabric, Quilt, Forge, NeoForge), докачивает недостающие моды с CurseForge/Modrinth и их зависимости с Modrinth, ставит загрузчик (Forge/NeoForge — официальным установщиком) и создаёт версию TLauncher с папкой игры `.minecraft/custom/<имя>`.
 - `server_host.py` — вкладка «Сервер»: из сборки, добавленной в «Свои сборки», собирает сервер в выбранной папке — моды без клиентских (по метаданным и по Modrinth, нужные другим модам возвращаются), конфиги, KubeJS и датапаки, серверный загрузчик, полная Java нужной версии (или официальная от Mojang), `start.bat`, `server.properties` с датапаками OpenLoader в `initial-enabled-packs`. Настройки сервера правятся в окне лаунчера.
-- `cloud_server.py` — облако на ПК хоста (порт 8518), раздаёт папку `launcher-cloud` и принимает скины игроков (`POST /skins/upload`). В игре скины показывает мод CustomSkinLoader. Токены ников лежат в `skin_tokens.json` (не в git); чтобы сбросить ник, удали его строку оттуда. Запускается из `start.bat`.
+- `cloud_server.py` — облако на ПК хоста (порт 8518), раздаёт папку `launcher-cloud` и принимает скины игроков (`POST /skins/upload`). В игре скины показывает мод CustomSkinLoader. Токены ников лежат в `skin_tokens.json` рядом с `launcher-cloud` (вне раздаваемой папки); чтобы сбросить ник, удали его строку оттуда.
+- `cloud_tray.py` — облако в трее, без окна консоли: включить, пауза (порт занят, друзьям отвечает «на паузе»), выключить; сам ставит себя в автозапуск Windows при первом запуске (пункт меню снимает), работает с пониженным приоритетом. Журнал — `cloud.log` рядом с облаком. Запуск: `.venv\Scripts\pythonw.exe cloud_tray.py`.
 - `update_manifest.py` — пересобирает манифесты всех сборок, `launcher-cloud/packs.json` и `launcher-cloud/launcher.json` (хэш свежего `MineForFriends.exe`; копия `MineSerc.exe` — для лаунчеров до переименования) после любых изменений в облаке.
 - Лаунчер сам обновляется: при запуске сверяет себя с последним релизом на GitHub (или с `launcher.json` в облаке, если GitHub недоступен) и, если вышла новая версия, скачивает её, подменяет свой exe и перезапускается. Друзьям хватает один раз получить `MineForFriends.exe`. Настройки прежнего MineSerc (`%APPDATA%\MineSerc`) переезжают в `%APPDATA%\MineForFriends` сами.
 - `make_icon.py` — рисует `icon.ico` (пиксельный блок травы).
 - `get_mods.py` — скачивает моды с Modrinth под Fabric 26.3 вместе с зависимостями.
 
-Эта папка должна лежать в папке сервера рядом с `launcher-cloud/`.
+Всё про лаунчер живёт в отдельной папке `D:\MineForFriends`, отдельно от серверов Minecraft:
+
+```
+D:\MineForFriends\
+  launcher\          этот репозиторий
+  launcher-cloud\    то, что раздаёт облако
+  skin_tokens.json   токены ников
+  cloud.log          журнал облака
+```
 
 ## Окружение
 

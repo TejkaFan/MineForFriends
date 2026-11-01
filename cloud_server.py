@@ -1,7 +1,8 @@
 """Облако MineForFriends by TEJKA: раздаёт папку launcher-cloud (сборки, моды, ресурспаки, скины) для лаунчера друзей.
 
-Запускается из start.bat любого из серверов (MineSerc, Homestead). Порт 8518;
-если облако уже запущено, второй экземпляр сразу закрывается.
+Работает из трея (cloud_tray.py, сам запускается при входе в Windows) или вручную:
+    python cloud_server.py
+Порт 8518; если облако уже запущено, второй экземпляр сразу закрывается.
 
 Скины (для мода CustomSkinLoader, тип CustomSkinAPI):
     GET  /skins/<ник>.json        профиль {"username", "skins": {"default"|"slim": <хэш>}}
@@ -31,11 +32,15 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 PORT = 8518
-CLOUD = Path(__file__).resolve().parent.parent / "launcher-cloud"
+# Папка MineForFriends: рядом лежат launcher (код) и launcher-cloud (то, что раздаём)
+ROOT = Path(__file__).resolve().parent.parent
+CLOUD = ROOT / "launcher-cloud"
 SKINS = CLOUD / "skins"
 TEXTURES = SKINS / "textures"
 # Лежит вне раздаваемой папки, чтобы его нельзя было скачать
-TOKENS = Path(__file__).resolve().parent / "skin_tokens.json"
+TOKENS = ROOT / "skin_tokens.json"
+# Пауза из трея: облако держит порт, но на все запросы отвечает «на паузе»
+state = {"paused": False}
 
 NICK_RE = re.compile(r"^[A-Za-z0-9_]{3,16}$")
 MAX_SKIN = 1 << 20
@@ -184,12 +189,21 @@ class Handler(SimpleHTTPRequestHandler):
         self.log_message("пересылка %s %s -> %s", method, url.split("?")[0], r.status)
         return True
 
+    def paused(self) -> bool:
+        if state["paused"]:
+            self.reply(503, "Облако хоста на паузе. Попроси хоста включить его.")
+        return state["paused"]
+
+    def do_HEAD(self):
+        if not self.paused():
+            super().do_HEAD()
+
     def do_GET(self):
-        if not self.relay("GET"):
+        if not self.paused() and not self.relay("GET"):
             super().do_GET()
 
     def do_POST(self):
-        if self.relay("POST"):
+        if self.paused() or self.relay("POST"):
             return
         if self.path != "/skins/upload":
             self.send_error(404)
@@ -240,10 +254,14 @@ class CloudServer(ThreadingHTTPServer):
         super().server_bind()
 
 
+def serve() -> CloudServer:
+    """Занимает порт и возвращает сервер; OSError — порт занят (облако уже запущено)."""
+    return CloudServer(("0.0.0.0", PORT), functools.partial(Handler, directory=str(CLOUD)))
+
+
 def main() -> None:
-    handler = functools.partial(Handler, directory=str(CLOUD))
     try:
-        httpd = CloudServer(("0.0.0.0", PORT), handler)
+        httpd = serve()
     except OSError:
         print(f"Порт {PORT} уже занят — облако уже запущено, второе не нужно.")
         return

@@ -6,7 +6,7 @@
 - packs.json — список всех сборок для карточек серверов в лаунчере.
 
 Запускать после любых изменений в облаке:
-    D:\\MineSerc-Fabric\\launcher\\.venv\\Scripts\\python.exe D:\\MineSerc-Fabric\\launcher\\update_manifest.py
+    D:\\MineForFriends\\launcher\\.venv\\Scripts\\python.exe D:\\MineForFriends\\launcher\\update_manifest.py
 """
 import hashlib
 import json
