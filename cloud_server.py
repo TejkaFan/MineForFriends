@@ -25,6 +25,7 @@ import shutil
 import socket
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -239,7 +240,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, fmt, *args):
-        sys.stdout.write(f"{self.address_string()} {fmt % args}\n")
+        sys.stdout.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {self.address_string()} {fmt % args}\n")
         sys.stdout.flush()
 
 

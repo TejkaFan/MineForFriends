@@ -24,6 +24,7 @@ import time
 import traceback
 import urllib.parse
 import webbrowser
+import winreg
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -45,7 +46,7 @@ import server_host
 import share
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.10.1"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -86,6 +87,8 @@ GITHUB_LATEST = "https://api.github.com/repos/TejkaFan/MineForFriends/releases/l
 # Список обновлений — описания релизов; последний полученный хранится на случай без интернета
 GITHUB_RELEASES = "https://api.github.com/repos/TejkaFan/MineForFriends/releases?per_page=20"
 RELEASES_CACHE = SETTINGS_FILE.parent / "releases.json"
+# Имя облака хоста в автозапуске Windows (cloud_tray.py)
+CLOUD_AUTOSTART = "MineForFriends-Cloud"
 # Наши сборки в интернете (publish_packs.py): ставятся и без Radmin. Моды — с Modrinth, остальное —
 # из служебного предрелиза packs; облако хоста, если отвечает, — быстрый источник тех же файлов
 PACKS_WEB = "https://github.com/TejkaFan/MineForFriends/releases/download/packs/"
@@ -261,6 +264,28 @@ def prepare_workdir(game_dir, mc_dir: Path) -> None:
         menus = source / "customizablemenus.txt"
         if menus.is_file():
             shutil.copyfile(menus, target / "customizablemenus.txt")
+    except OSError:
+        traceback.print_exc()
+
+
+def ensure_cloud() -> None:
+    """На ПК хоста облако (cloud_tray.py) стоит в автозапуске Windows. Если оно не отвечает (не
+    запустилось после перезагрузки или упало) — запускаем той же командой: без облака друзья
+    из России не загрузят скин и не скачают сборку. Выключенное из трея облако так и останется
+    выключенным: значок уже запущен, вторая копия сразу закроется."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+            command = winreg.QueryValueEx(key, CLOUD_AUTOSTART)[0]
+    except OSError:
+        return  # не ПК хоста
+    with socket.socket() as s:
+        s.settimeout(1)
+        if s.connect_ex(("127.0.0.1", 8518)) == 0:
+            return
+    print("Облако хоста не отвечает — запускаю")
+    try:
+        subprocess.Popen(command, close_fds=True,
+                         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
     except OSError:
         traceback.print_exc()
 
@@ -1198,6 +1223,7 @@ class Api:
         friends.Presence(self._about_me).start()
         # Сервер мог быть запущен и без лаунчера (start.bat): раздача сама дождётся его или закроется
         start_sharing()
+        ensure_cloud()
         if not tlauncher_exe():
             self._watch_tlauncher()  # игрок может поставить TLauncher и без нашей кнопки
         if self_update(self._status("boot")):
@@ -1679,6 +1705,7 @@ class Api:
         saved = server_admin.backup(Path(path), False, self._status("host"))
         server_host.start(record)
         start_sharing()
+        ensure_cloud()
         return ((f"Бэкап мира: {saved.name}. " if saved else "")
                 + f"Сервер «{record['name']}» запускается в отдельном окне. Друзья в Radmin увидят его в лаунчере "
                 f"на вкладке «Наши серверы». Если Windows спросит про доступ MineForFriends к сети — разреши.")
