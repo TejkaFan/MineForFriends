@@ -158,9 +158,7 @@ function renderServers(d) {
   const line = $("#cloud-line");
   if (!d.cloud && !d.packs.length) {
     line.className = "line err";
-    line.textContent = state.radmin?.on
-      ? "Наш сервер не отвечает. Проверь, что в Radmin VPN ты зашёл в нашу сеть, или подожди, пока хост включит облако."
-      : "Облако недоступно — сборки сейчас не загрузить. Проверь Radmin VPN или подожди, пока хост включит сервер.";
+    line.textContent = "Не удалось получить список наших сборок. Проверь интернет и попробуй чуть позже.";
     $("#cards").innerHTML = "";
     updatePlay();
     return;
@@ -168,7 +166,7 @@ function renderServers(d) {
   line.className = "line muted";
   line.textContent = d.cloud
     ? "Нажми на карточку, чтобы ставить и обновлять эту сборку. Индикатор обновляется сам."
-    : "Наше облако недоступно — показаны серверы, запущенные через лаунчер в Radmin.";
+    : "Список наших сборок недоступен — показаны серверы, запущенные через лаунчер в Radmin.";
   $("#cards").innerHTML = d.packs.map(p => {
     const st = p.status;
     const on = state.selected.includes(p.id);
@@ -195,7 +193,7 @@ function updatePlay() {
   $("#play-btn").disabled = !state.ready || !chosen.length || state.busy || !state.tlauncher;
   if (!state.ready || state.busy) return;
   $("#play-hint").textContent = !state.tlauncher ? "Сначала установи TLauncher"
-    : !state.packs.length ? "Нет связи с облаком"
+    : !state.packs.length ? "Нет списка сборок"
     : chosen.length ? `Обновит ${chosen.join(", ")} и откроет TLauncher`
     : "Отметь хотя бы одну сборку";
 }

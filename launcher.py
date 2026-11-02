@@ -10,6 +10,7 @@ import base64
 import ctypes
 import functools
 import hashlib
+import io
 import json
 import os
 import re
@@ -23,6 +24,7 @@ import time
 import traceback
 import urllib.parse
 import webbrowser
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -43,7 +45,7 @@ import server_host
 import share
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.9.9"
+APP_VERSION = "0.10.0"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -84,6 +86,12 @@ GITHUB_LATEST = "https://api.github.com/repos/TejkaFan/MineForFriends/releases/l
 # Список обновлений — описания релизов; последний полученный хранится на случай без интернета
 GITHUB_RELEASES = "https://api.github.com/repos/TejkaFan/MineForFriends/releases?per_page=20"
 RELEASES_CACHE = SETTINGS_FILE.parent / "releases.json"
+# Наши сборки в интернете (publish_packs.py): ставятся и без Radmin. Моды — с Modrinth, остальное —
+# из служебного предрелиза packs; облако хоста, если отвечает, — быстрый источник тех же файлов
+PACKS_WEB = "https://github.com/TejkaFan/MineForFriends/releases/download/packs/"
+PACKS_CACHE = SETTINGS_FILE.parent / "packs"
+# Индикатор серверов обновляется часто, а список сборок меняется редко
+PACKS_LIST_TTL = 600
 # Скины: читает их CustomSkinLoader прямо с GitHub, а загружает Cloudflare Worker (skins-worker/)
 SKINS_ROOT = "https://raw.githubusercontent.com/TejkaFan/MineForFriends-skins/main/skins/"
 # Внутри exe ресурсы лежат во временной папке PyInstaller
@@ -275,6 +283,10 @@ def save_selected_packs(ids: list) -> None:
     save_json(SETTINGS_FILE, settings)
 
 
+# Последний полученный список сборок: индикатор серверов не спрашивает GitHub каждые 30 секунд
+_packs_list = {"at": -PACKS_LIST_TTL, "packs": []}
+
+
 def normalize_pack(entry: dict, manifest: dict) -> dict:
     """Приводит манифест сборки к одному виду: список файлов с путями внутри папки игры."""
     pack = {**DEFAULT_PACK, **entry, **{k: v for k, v in manifest.items() if k not in ("files", "mods", "resourcepacks")}}
@@ -329,7 +341,7 @@ def release_notes():
         r.raise_for_status()
         releases = [{"version": (rel.get("name") or rel["tag_name"]).removeprefix("MineForFriends ").strip(),
                      "date": (rel.get("published_at") or "")[:10], "notes": rel.get("body") or ""}
-                    for rel in r.json() if not rel.get("draft")]
+                    for rel in r.json() if not rel.get("draft") and not rel.get("prerelease")]
         save_json(RELEASES_CACHE, releases)
         return releases
     except (requests.RequestException, ValueError, KeyError, TypeError):
@@ -403,6 +415,7 @@ class Updater:
         # Тут же хранятся ник и токены скинов
         self.game_dir = self.mc_dir / DEFAULT_PACK["game_dir"]
         self.state_file = self.game_dir / "launcher_state.json"
+        self._cloud_alive = None
 
     def fetch_json(self, path: str):
         try:
@@ -411,20 +424,65 @@ class Updater:
             return r.json()
         except requests.RequestException as e:
             raise RuntimeError(
-                "Нет связи с сервером.\n\nПроверь, что Radmin VPN запущен и ты в нашей сети, "
-                "а хост включил сервер.\n\n" + str(e)
+                "Нет связи с сервером.\n\nПроверь интернет. Если он есть — попробуй ещё раз чуть позже "
+                "или зайди в нашу сеть Radmin VPN.\n\n" + str(e)
             ) from None
 
-    def fetch_packs(self) -> list:
-        self.status("Связь с сервером…")
+    def web_json(self, name: str):
+        # С GitHub; удачный ответ сохраняем — без интернета и облака сборки всё равно найдутся
+        r = web.get(PACKS_WEB + name, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        save_json(PACKS_CACHE / name, data)
+        return data
+
+    def fetch_packs(self, max_age: float = 0) -> list:
+        if max_age and time.monotonic() - _packs_list["at"] < max_age:
+            return _packs_list["packs"]
+        self.status("Получаю список сборок…")
         try:
-            r = cloud.get(f"{CLOUD_URL}/packs.json", timeout=8)
+            packs = [{**p, "source": "web"} for p in self.web_json("packs.json")["packs"]]
+        except (requests.RequestException, ValueError, KeyError):
+            traceback.print_exc()
+            packs = self.cloud_packs()
+        _packs_list.update(at=time.monotonic(), packs=packs)
+        return packs
+
+    def cloud_packs(self) -> list:
+        # Интернет-список недоступен: облако хоста по Radmin, а без него — последний сохранённый список
+        try:
+            r = cloud.get(f"{relay.CLOUD}/packs.json", timeout=(2, 8))
             if r.status_code == 404:
                 return [dict(DEFAULT_PACK)]  # облако без списка сборок
             r.raise_for_status()
             return r.json()["packs"]
         except requests.RequestException:
+            saved = load_json(PACKS_CACHE / "packs.json", None)
+            if saved:
+                return [{**p, "source": "web"} for p in saved["packs"]]
             return [dict(DEFAULT_PACK)] if self.fetch_json(DEFAULT_PACK["manifest"]) else []
+
+    def fetch_manifest(self, entry: dict) -> dict:
+        if entry.get("source") == "web":
+            try:
+                return self.web_json(entry["manifest"])
+            except (requests.RequestException, ValueError):
+                traceback.print_exc()
+                saved = load_json(PACKS_CACHE / entry["manifest"], None)
+                if saved:
+                    return saved
+            # Манифест сборки в облаке лежит рядом с её файлами
+            return self.fetch_json(entry.get("base", "") + "manifest.json")
+        return self.fetch_json(entry["manifest"])
+
+    def cloud_alive(self) -> bool:
+        # Облако хоста по Radmin — быстрый источник файлов; не отвечает за 2 секунды — качаем из интернета
+        if self._cloud_alive is None:
+            try:
+                self._cloud_alive = cloud.get(f"{relay.CLOUD}/packs.json", timeout=(2, 5)).ok
+            except requests.RequestException:
+                self._cloud_alive = False
+        return self._cloud_alive
 
     def build_version(self, pack: dict, game_dir: Path) -> dict:
         # Склеиваем ванильную версию и профиль Fabric в одну самостоятельную версию
@@ -504,10 +562,10 @@ class Updater:
         save_json(self.state_file, state)
         return message
 
-    def download(self, url: str, dest: Path, expected_sha1: str) -> None:
+    def download(self, url: str, dest: Path, expected_sha1: str, session=cloud) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + ".part")
-        with cloud.get(url, stream=True, timeout=30) as r:
+        with session.get(url, stream=True, timeout=30) as r:
             r.raise_for_status()
             with tmp.open("wb") as f:
                 for chunk in r.iter_content(1 << 16):
@@ -559,32 +617,44 @@ class Updater:
                 todo.append(f)
 
         total = sum(f["size"] for f in todo) or 1
-        done = 0
-        # Сборки друзей качаются с ПК хоста, остальные — из облака
-        root = pack.get("root") or CLOUD_URL
-        # Пути считаем до загрузки: resolve() не должен видеть папки, которые как раз создают потоки
-        targets = [(f, inside(game_dir, f["path"])) for f in todo]
-        with ThreadPoolExecutor(DOWNLOAD_THREADS) as pool:
-            jobs = {pool.submit(self.download, f"{root}/{requests.utils.quote(pack['base'] + f['path'])}",
-                                dest, f["sha1"]): f for f, dest in targets}
-            try:
-                for i, job in enumerate(as_completed(jobs), 1):
-                    job.result()
-                    f = jobs[job]
-                    if f["path"] not in once:
-                        recorded[f["path"]] = f["sha1"]
-                    done += f["size"]
-                    self.status(f"{name}: скачиваю файлы ({i}/{len(todo)}, {done / 2**20:.0f} из {total / 2**20:.0f} МБ)")
-                    self.progress(done / total)
-                    if i % 100 == 0:
-                        # Чтобы после обрыва связи продолжить с того же места
-                        state["files"] = recorded
-                        save_json(state_file, state)
-            except BaseException:
-                pool.shutdown(cancel_futures=True)
+        count = {"files": 0, "bytes": 0}
+
+        def finished(f: dict) -> None:
+            if f["path"] not in once:
+                recorded[f["path"]] = f["sha1"]
+            count["files"] += 1
+            count["bytes"] += f["size"]
+            self.status(f"{name}: скачиваю файлы ({count['files']}/{len(todo)}, "
+                        f"{count['bytes'] / 2**20:.0f} из {total / 2**20:.0f} МБ)")
+            self.progress(count["bytes"] / total)
+            if count["files"] % 100 == 0:
+                # Чтобы после обрыва связи продолжить с того же места
                 state["files"] = recorded
                 save_json(state_file, state)
-                raise
+
+        # Пути считаем до загрузки: resolve() не должен видеть папки, которые как раз создают потоки
+        targets = [(f, inside(game_dir, f["path"])) for f in todo]
+        quote = lambda f: requests.utils.quote(pack["base"] + f["path"])
+        try:
+            if pack.get("source") != "web":
+                # Сборки друзей качаются с их ПК, сборки из облачного списка — из облака
+                root = pack.get("root") or CLOUD_URL
+                self.fetch_all([(f, dest, f"{root}/{quote(f)}", cloud) for f, dest in targets], finished)
+            else:
+                if targets and self.cloud_alive():
+                    targets = self.fetch_all([(f, dest, f"{relay.CLOUD}/{quote(f)}", cloud) for f, dest in targets],
+                                             finished, keep_going=True)
+                self.fetch_all([(f, dest, f.get("url") or PACKS_WEB + f["asset"], web)
+                                for f, dest in targets if "bundle" not in f], finished)
+                bundles = {}
+                for f, dest in targets:
+                    if "bundle" in f:
+                        bundles.setdefault(f["bundle"], []).append((f, dest))
+                self.fetch_bundles(bundles, finished)
+        except BaseException:
+            state["files"] = recorded
+            save_json(state_file, state)
+            raise
 
         state["files"] = recorded
         state.pop("managed_mods", None)
@@ -594,6 +664,54 @@ class Updater:
         options = game_dir / "options.txt"
         if not options.exists():
             options.write_text("lang:ru_ru\n", "utf-8")
+
+    def fetch_all(self, jobs: list, finished, keep_going: bool = False) -> list:
+        """Качает [(файл, куда, ссылка, сессия)] в несколько потоков. keep_going — не прерываться
+        на ошибках, а вернуть то, что не скачалось (чтобы взять это из другого источника)."""
+        failed = []
+        with ThreadPoolExecutor(DOWNLOAD_THREADS) as pool:
+            running = {pool.submit(self.download, url, dest, f["sha1"], session): (f, dest)
+                       for f, dest, url, session in jobs}
+            try:
+                for job in as_completed(running):
+                    try:
+                        job.result()
+                    except (requests.RequestException, RuntimeError, OSError):
+                        if not keep_going:
+                            raise
+                        failed.append(running[job])
+                        continue
+                    finished(running[job][0])
+            except BaseException:
+                pool.shutdown(cancel_futures=True)
+                raise
+        return failed
+
+    def fetch_bundles(self, bundles: dict, finished) -> None:
+        """Мелкие файлы сборки лежат на GitHub архивами: из архива берём только нужные файлы."""
+        def unpack(name: str, items: list) -> list:
+            r = web.get(PACKS_WEB + name, timeout=60)
+            r.raise_for_status()
+            with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                for f, dest in items:
+                    data = z.read(f["path"])
+                    if hashlib.sha1(data).hexdigest() != f["sha1"]:
+                        raise RuntimeError(f"Файл {dest.name} скачался с ошибкой, попробуй ещё раз.")
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = dest.with_name(dest.name + ".part")
+                    tmp.write_bytes(data)
+                    tmp.replace(dest)
+            return items
+
+        with ThreadPoolExecutor(DOWNLOAD_THREADS) as pool:
+            running = [pool.submit(unpack, name, items) for name, items in bundles.items()]
+            try:
+                for job in as_completed(running):
+                    for f, _ in job.result():
+                        finished(f)
+            except BaseException:
+                pool.shutdown(cancel_futures=True)
+                raise
 
     def enable_packs(self, game_dir: Path, names: list) -> None:
         """Включает ресурспаки сервера в options.txt в нужном порядке.
@@ -702,13 +820,13 @@ class Updater:
             except RuntimeError:
                 if not versions:
                     raise
-                notes.append("Облако недоступно, наши сборки не обновлены.")
+                notes.append("Список наших сборок недоступен, они не обновлены.")
         if not chosen and not versions:
             raise RuntimeError("Не выбрано ни одной сборки. Отметь нужные карточки на вкладке «Наши серверы».")
 
         for entry in chosen:
             self.status(f"{entry['name']}: получаю список файлов…")
-            pack = normalize_pack(entry, self.fetch_json(entry["manifest"]))
+            pack = normalize_pack(entry, self.fetch_manifest(entry))
             game_dir = self.mc_dir / pack["game_dir"]
             self.install_version(pack, game_dir)
             setup_skin_loader(game_dir)
@@ -1167,7 +1285,7 @@ class Api:
         # Индикатор: сборки из облака, свои серверы и серверы друзей в Radmin, какие из них включены
         cards = []
         try:
-            for e in Updater(lambda s: None, lambda v: None).fetch_packs():
+            for e in Updater(lambda s: None, lambda v: None).fetch_packs(max_age=PACKS_LIST_TTL):
                 cards.append({"id": e["id"], "name": e["name"], "description": e.get("description", ""),
                               "size": e.get("size"), "address": e.get("server") or DEFAULT_PACK["server"]})
             cloud_ok = True
