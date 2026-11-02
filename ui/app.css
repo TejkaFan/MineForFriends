@@ -371,3 +371,11 @@ table.stats td.bar i { display: block; height: 6px; border-radius: 3px; backgrou
 .item.upd input { width: 16px; height: 16px; accent-color: var(--green); flex: none; }
 .item.upd .tag { font-size: 11px; color: var(--yellow); margin-left: 6px; font-weight: 400; }
 .item.upd .meta b { color: var(--green); font-weight: 600; }
+
+/* Индикатор облака хоста в «О лаунчере» */
+.cloud-state { display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin-bottom: 14px;
+  border-radius: 10px; background: var(--card); color: var(--muted); font-size: 13px; }
+.cloud-state svg { width: 18px; height: 18px; flex: none; }
+.cloud-state.on { color: var(--ok); }
+.cloud-state.paused { color: var(--yellow); }
+.cloud-state.off { color: var(--red); }

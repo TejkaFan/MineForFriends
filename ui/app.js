@@ -1356,7 +1356,8 @@ function about() {
   const credits = CREDITS.map(([where, name, url]) => `<span>${where}</span><span>${url
     ? `<a data-url="${esc(url)}">${esc(name)}</a>`
     : `<a data-copy="${esc(name)}" title="Нажми, чтобы скопировать">${esc(name)}</a>`}</span>`).join("");
-  const html = `<div class="kv">
+  const html = `<div class="cloud-state" id="cloud-state">${icon("cloud-download")}<span>Облако хоста: проверяю…</span></div>
+    <div class="kv">
       <span>Версия</span><span>${esc(i.version)} (сборка ${esc(i.build)})</span>
       <span>Облако</span><span>${esc(i.cloud_url)}</span>
       <span>Папка Minecraft</span><span>${esc(i.mc_dir)}</span>
@@ -1369,12 +1370,19 @@ function about() {
       <label class="check"><input type="checkbox" data-opt="presence"${i.options.presence ? " checked" : ""}><span>Показывать друзьям по Radmin, что я в сети и во что играю</span></label>
     </div>
     <div class="credits"><h4 class="px">Credits</h4><div class="kv">${credits}</div></div>`;
-  dialog({title: "MineForFriends by TEJKA", html, buttons: [
+  const closed = dialog({title: "MineForFriends by TEJKA", html, buttons: [
+    {label: "Проверить сайты", value: "sites"},
     {label: "Отправить лог", value: "report"}, {label: "Папка Minecraft", value: "mc"},
     {label: "Закрыть", value: null, primary: true},
-  ]}).then(v => {
+  ]});
+  // Индикатор облака хоста обновляется, пока окно открыто
+  const timer = setInterval(showCloudState, 5000);
+  showCloudState();
+  closed.then(v => {
+    clearInterval(timer);
     if (v === "mc") api().open_folder(i.mc_dir);
     if (v === "report") sendReport("Отчёт игрока из окна «О лаунчере»");
+    if (v === "sites") sitesDialog();
   });
   $("#modal-body").onchange = e => {
     const opt = e.target.dataset.opt;
@@ -1390,6 +1398,54 @@ function about() {
       setTimeout(() => (a.textContent = a.dataset.copy), 1500);
     }
   };
+}
+
+async function showCloudState() {
+  const box = $("#cloud-state");
+  if (!box) return;
+  let s;
+  try {
+    s = await api().cloud_status();
+  } catch {
+    return;
+  }
+  const text = {
+    on: `Облако хоста работает · ${s.ms} мс. Через него идут обход блокировок и быстрые загрузки сборок.`,
+    paused: "Облако хоста на паузе — обход блокировок не работает, пока хост его не включит.",
+    off: "Облако хоста недоступно: хост выключил его или ты не в сети Radmin. Без него обхода блокировок нет.",
+  }[s.state];
+  box.className = `cloud-state ${s.state}`;
+  box.innerHTML = `${icon("cloud-download")}<span>${esc(text)}</span>`;
+}
+
+// Настройки → «Проверить доступ к сайтам»: что открывается напрямую, а что режет провайдер
+async function sitesDialog() {
+  const marks = {ok: ["check", "ok"], cut: ["alert-triangle", "warn"], fail: ["x", "bad"]};
+  let last = null;
+  const run = async () => {
+    const body = $("#modal-body");
+    body.innerHTML = `<div class="muted">Проверяю сайты… это до 15 секунд.</div>`;
+    try {
+      last = await api().check_sites();
+      body.innerHTML = `<div class="ck-list">${last.results.map(r => `<div class="ck ${marks[r.state][1]}">
+          <span class="ck-ico">${icon(marks[r.state][0])}</span>
+          <div><div class="ck-title">${esc(r.title)} — ${esc(r.text)}</div><div class="ck-text">${esc(r.purpose)}</div></div></div>`).join("")}</div>
+        <div class="ck-summary ${last.results.some(r => r.state !== "ok") ? "bad" : "ok"}">${esc(last.summary)}</div>`;
+    } catch (e) {
+      body.innerHTML = `<div class="hint">${esc(errText(e))}</div>`;
+    }
+    return false;
+  };
+  const send = async () => {
+    if (last) await sendReport(last.report);
+    return false;
+  };
+  const done = dialog({title: "Доступ к сайтам", html: "", wide: true, buttons: [
+    {label: "Отправить результат автору", value: null, check: send},
+    {label: "Проверить снова", value: null, check: run},
+    {label: "Закрыть", value: null, primary: true}]});
+  run();
+  await done;
 }
 
 // ---------- Что нового ----------

@@ -37,6 +37,7 @@ from cloud_server import MAX_SKIN, NICK_RE, png_size, valid_skin_size
 import crashes
 import friends
 import mod_updates
+import netcheck
 import recipes
 import relay
 import reports
@@ -1380,6 +1381,16 @@ class Api:
         if not address:
             raise RuntimeError("Впиши адрес сервера, например 26.12.34.56:25565.")
         return friends.check(address, radmin_state(), lambda a: server_status(a, 5))
+
+    def check_sites(self) -> dict:
+        # Настройки → «Проверить доступ к сайтам»
+        result = netcheck.check()
+        result["report"] = netcheck.report_text(result)
+        print(result["report"])
+        return result
+
+    def cloud_status(self) -> dict:
+        return netcheck.cloud_status()
 
     def open_radmin(self) -> None:
         exe = radmin_exe()
