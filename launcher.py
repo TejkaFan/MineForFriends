@@ -45,7 +45,7 @@ import server_host
 import share
 
 APP_NAME = "MineForFriends by TEJKA"
-APP_VERSION = "0.10.1"
+APP_VERSION = "0.10.0"
 # Короткое имя без пробелов: папка настроек, имя exe, загрузчик скинов
 APP_ID = "MineForFriends"
 LAUNCHER_EXE = f"{APP_ID}.exe"
@@ -310,29 +310,28 @@ def inside(base: Path, rel: str):
     return path if base.resolve() in path.parents else None
 
 
-def launcher_sources() -> list:
-    """Откуда взять свежий MineForFriends.exe: [(сессия, ссылка, алгоритм хэша, хэш)] по порядку.
+def latest_launcher():
+    """Где взять свежий MineForFriends.exe: (сессия, ссылка, алгоритм хэша, хэш) или None.
 
-    Облако хоста — первым, если отвечает: по Radmin быстро, а из России GitHub без VPN
-    отдаёт маленькие ответы, но обрывает скачивание exe. Затем последний релиз на GitHub.
+    Сначала последний релиз на GitHub, а если GitHub недоступен или в релизе нет exe —
+    облако хоста (launcher.json).
     """
-    sources = []
-    try:
-        info = cloud.get(f"{relay.CLOUD}/{LAUNCHER_INFO}", timeout=(2, 5)).json()
-        if info.get("sha1"):
-            sources.append((cloud, f"{relay.CLOUD}/{LAUNCHER_EXE}", "sha1", info["sha1"]))
-    except (requests.RequestException, ValueError):
-        traceback.print_exc()
     try:
         r = web.get(GITHUB_LATEST, timeout=8, headers={"Accept": "application/vnd.github+json"})
         r.raise_for_status()
         asset = next((a for a in r.json().get("assets", []) if a.get("name") == LAUNCHER_EXE), None)
         algo, _, digest = str((asset or {}).get("digest") or "").partition(":")
         if algo == "sha256" and digest:
-            sources.append((web, asset["browser_download_url"], "sha256", digest))
+            return web, asset["browser_download_url"], "sha256", digest
     except (requests.RequestException, ValueError, KeyError):
         traceback.print_exc()
-    return sources
+    try:
+        info = cloud.get(f"{CLOUD_URL}/{LAUNCHER_INFO}", timeout=5).json()
+        if info.get("sha1"):
+            return cloud, f"{CLOUD_URL}/{LAUNCHER_EXE}", "sha1", info["sha1"]
+    except (requests.RequestException, ValueError):
+        traceback.print_exc()
+    return None
 
 
 def release_notes():
@@ -370,36 +369,37 @@ def self_update(status) -> bool:
         old.unlink(missing_ok=True)
     except OSError:
         pass  # прошлый экземпляр ещё закрывается
-    for session, url, algo, digest in launcher_sources():
+    latest = latest_launcher()
+    if not latest:
+        return False
+    session, url, algo, digest = latest
+    try:
+        if sha1(exe, algo) == digest:
+            return False
+        status("Скачиваю новую версию лаунчера…")
+        part = exe.with_name(exe.name + ".part")
+        with session.get(url, stream=True, timeout=30) as r:
+            r.raise_for_status()
+            total, done, shown = int(r.headers.get("Content-Length") or 0), 0, -1
+            with part.open("wb") as f:
+                for chunk in r.iter_content(1 << 16):
+                    f.write(chunk)
+                    done += len(chunk)
+                    if total and done * 100 // total != shown:
+                        shown = done * 100 // total
+                        status(f"Скачиваю новую версию лаунчера… {shown}%")
+        if sha1(part, algo) != digest:
+            part.unlink()
+            return False
+        exe.replace(old)
         try:
-            if sha1(exe, algo) == digest:
-                return False
-            status("Скачиваю новую версию лаунчера…")
-            part = exe.with_name(exe.name + ".part")
-            with session.get(url, stream=True, timeout=30) as r:
-                r.raise_for_status()
-                total, done, shown = int(r.headers.get("Content-Length") or 0), 0, -1
-                with part.open("wb") as f:
-                    for chunk in r.iter_content(1 << 16):
-                        f.write(chunk)
-                        done += len(chunk)
-                        if total and done * 100 // total != shown:
-                            shown = done * 100 // total
-                            status(f"Скачиваю новую версию лаунчера… {shown}%")
-            if sha1(part, algo) != digest:
-                part.unlink()
-                continue
-            exe.replace(old)
-            try:
-                part.replace(exe)
-            except OSError:
-                old.replace(exe)
-                raise
-            break
-        except (requests.RequestException, ValueError, OSError):
-            # Обрыв загрузки — пробуем следующий источник; не вышло нигде — работаем на текущей версии
-            traceback.print_exc()
-    else:
+            part.replace(exe)
+        except OSError:
+            old.replace(exe)
+            raise
+    except (requests.RequestException, ValueError, OSError):
+        # Обрыв загрузки или нет прав на папку — работаем на текущей версии
+        traceback.print_exc()
         return False
     # Новый exe должен распаковаться заново, а не подхватить временную папку этого
     env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
@@ -419,7 +419,7 @@ class Updater:
 
     def fetch_json(self, path: str):
         try:
-            r = cloud.get(f"{relay.CLOUD}/{path}", timeout=8)
+            r = cloud.get(f"{CLOUD_URL}/{path}", timeout=8)
             r.raise_for_status()
             return r.json()
         except requests.RequestException as e:
@@ -440,34 +440,23 @@ class Updater:
         if max_age and time.monotonic() - _packs_list["at"] < max_age:
             return _packs_list["packs"]
         self.status("Получаю список сборок…")
-        packs = None
-        if self.cloud_alive():
-            # По Radmin быстро и не зависит от того, открываются ли у игрока GitHub и Modrinth
-            try:
-                packs = self.cloud_list()
-            except (requests.RequestException, ValueError, KeyError):
-                traceback.print_exc()
-        if packs is None:
-            try:
-                packs = [{**p, "source": "web"} for p in self.web_json("packs.json")["packs"]]
-            except (requests.RequestException, ValueError, KeyError):
-                traceback.print_exc()
-                packs = self.cloud_packs()
+        try:
+            packs = [{**p, "source": "web"} for p in self.web_json("packs.json")["packs"]]
+        except (requests.RequestException, ValueError, KeyError):
+            traceback.print_exc()
+            packs = self.cloud_packs()
         _packs_list.update(at=time.monotonic(), packs=packs)
         return packs
-
-    def cloud_list(self) -> list:
-        r = cloud.get(f"{relay.CLOUD}/packs.json", timeout=(2, 8))
-        if r.status_code == 404:
-            return [dict(DEFAULT_PACK)]  # облако без списка сборок
-        r.raise_for_status()
-        return r.json()["packs"]
 
     def cloud_packs(self) -> list:
         # Интернет-список недоступен: облако хоста по Radmin, а без него — последний сохранённый список
         try:
-            return self.cloud_list()
-        except (requests.RequestException, ValueError, KeyError):
+            r = cloud.get(f"{relay.CLOUD}/packs.json", timeout=(2, 8))
+            if r.status_code == 404:
+                return [dict(DEFAULT_PACK)]  # облако без списка сборок
+            r.raise_for_status()
+            return r.json()["packs"]
+        except requests.RequestException:
             saved = load_json(PACKS_CACHE / "packs.json", None)
             if saved:
                 return [{**p, "source": "web"} for p in saved["packs"]]
@@ -649,7 +638,7 @@ class Updater:
         try:
             if pack.get("source") != "web":
                 # Сборки друзей качаются с их ПК, сборки из облачного списка — из облака
-                root = pack.get("root") or relay.CLOUD
+                root = pack.get("root") or CLOUD_URL
                 self.fetch_all([(f, dest, f"{root}/{quote(f)}", cloud) for f, dest in targets], finished)
             else:
                 if targets and self.cloud_alive():
